@@ -19,34 +19,37 @@ import re
 import arrow
 import subprocess
 import sys
+import json
 
 from azure.storage.blob._shared.base_client import create_configuration
 from azure.storage.blob.aio import BlobServiceClient as BlobServiceClientAIO
 from azure.storage.blob import BlobServiceClient
 
 STORAGES = ["ADLS", "Blob", "onPrem"]
-
+CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 
 @Gooey
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien.')
-
-    parser.add_argument(
-        "--paths",
+    
+    requiredNamed = parser.add_argument_group('Required arguments')
+    requiredNamed.add_argument(
+        "-paths",
         "-p",
         type=lambda p: Path(p).absolute(),
         default=[Path(__file__).absolute().parent],
         nargs='+',
         help="Wurzelpfad(e)",
+        required=True
     )
-    parser.add_argument(
-        "--filetypes",
+    requiredNamed.add_argument(
+        "-filetypes",
         "-f",
-        default='cht',
+        default='',
         required=True,
         help="Erlaubte Dateiendung(en), Semikolon-seperariert. Asterisk for all types.",
     )
-    parser.add_argument(
+    requiredNamed.add_argument(
         "--storage",
         "-a",
         default=STORAGES[1],
@@ -54,17 +57,18 @@ def parse_arguments():
         required=True,
         help="Storage Option.",
     )
-    parser.add_argument(
-        "--connectionString",
+    requiredNamed.add_argument(
+        "-connectionString",
         "-c",
         required=True,
         help="<AccountName=$$$;AccountKey=$$$;Path=$$$)> (für Azure Storage: ADLS Gen1/Blob Container - Pfad der Storage Ressource) oder Pfad für Netzwerklaufwerk.",
     )
+    # optional
     parser.add_argument(
         "--proxy",
         "-y",
         default='',
-        help="Semikolon separated Proxy URLs or IP Adresses for http;https",
+        help="Semikolon separated Proxy URLs or IP Adresses for http;https format for each: 'http(s)://proxyURLorIP:proxyPort'",
     )
     parser.add_argument(
         "--save",
@@ -94,12 +98,16 @@ def parse_arguments():
         default=True,
         help="Run in verbose mode.",
     )
+    parser.add_argument(
+        "--load",
+        "-l",
+        action='store_true',
+        default=False,
+        help="Load config file. Run command first without this and --save option enabled to create an appropriate config file.",
+    )
     try:
         return parser.parse_args()
     except SystemExit as e:
-        # This exception will be raised if --help or invalid command line arguments
-        # are used. Currently streamlit prevents the program from exiting normally
-        # so we have to do a hard exit.
         os._exit(e.code)
 
 
@@ -365,7 +373,7 @@ def main(args):
     logger.addHandler(handler)
 
     # check if connection string arg, if correct init azureService to be passed to watchdog
-    failed, out, err, azureService = True, '', '', None
+    failed, out, err, pathToDestination, azureService = True, '', '', '', None
     connString = args.connectionString
     if all([s in connString for s in ["AccountName=","AccountKey=","Path=",";"]]):
         split = connString.split(';', 2)
@@ -382,45 +390,52 @@ def main(args):
             else:
                 proxy = None
 
-            if args.storage == STORAGES[0]:
-                # ADLS
-                # TODO: proxy
-                if not pathToDestination.startswith('/'):
-                    pathToDestination = '/' + pathToDestination
-                # check connection
-                cmd = f'az dls fs list --account {AccountName} --path "{pathToDestination}"'
-                failed, out, err = run_cli_command(cmd)
-                if failed:
-                    print("Did you set up azure-cli? Install and run az login in a shell: https://aka.ms/cli")
-                    print("Otherwise either connection string invalid, or check proxy settings.")
-                    exit(1)
+            if pathToDestination:
+                if args.storage == STORAGES[0]:
+                    # ADLS
+                    # TODO: proxy
+                    if not pathToDestination.startswith('/'):
+                        pathToDestination = '/' + pathToDestination
+                    # check connection
+                    cmd = f'az dls fs list --account {AccountName} --path "{pathToDestination}"'
+                    failed, out, err = run_cli_command(cmd)
+                    if failed:
+                        print("Did you set up azure-cli? Install and run az login in a shell: https://aka.ms/cli")
+                        print("Otherwise either connection string invalid, or check proxy settings.")
+                        exit(1)
+                    else:
+                        azureService = [f'az dls fs upload --account {AccountName} --source-path ', f' --destination-path "/{pathToDestination}/']
+                elif args.storage == STORAGES[1]:
+                    # BLOB
+                    # init 
+                    ac = AzureStorageContainer(connection_string=f"AccountName={AccountName};AccountKey={AccountKey}",
+                        container_name=pathToDestination, proxy=proxy)
+                    # check connection
+                    if not ac.connected:
+                        print("Cannot connect to Azure Blob Service.")
+                    else:
+                        failed = False
+                        azureService = ac
+                # TODO: implement the rest of the storage options
                 else:
-                    azureService = [f'az dls fs upload --account {AccountName} --source-path ', f' --destination-path "/{pathToDestination}/']
-            elif args.storage == STORAGES[1]:
-                # BLOB
-                # init 
-                ac = AzureStorageContainer(connection_string=f"AccountName={AccountName};AccountKey={AccountKey}",
-                    container_name=pathToDestination, proxy=proxy)
-                # check connection
-                if not ac.connected:
-                    print("Cannot connect to Azure Blob Service.")
-                else:
-                    failed = False
-                    azureService = ac
-            # TODO: implement the rest of the storage options
+                    raise NotImplementedError
             else:
-                raise NotImplementedError
+                print("Path in Connection String not set (correctly).")
         else:
             print("Check connection string. Format of connection string of Azure Dashboard not yet supported.")
 
     if not failed and azureService is not None:
         if args.verbose:
-            print("Schaue auf %s, bei Dateierstellung wird '%s' ausgeführt." % (args.paths, args.storage))
+            print(f"""Starting watchdog with config:
+                \nPaths: {args.paths}, \nFiletypes: {args.filetypes}, \nStorage: {args.storage}
+                \nRefreshRate: {args.refresh}, \nRecursive: {args.recursive}
+            """)
+            print(f"Schaue {'rekursiv' if args.recursive else ''} auf {args.paths}, bei Dateierstellung wird auf {args.storage} kopiert.")
         # watch filesystem for file creation
         # subdirs are create per day
         # in those subdirs are files created
-        zs = Zuschauer(paths=args.paths, filetypes=args.filetypes, storage=args.storage, recursive=args.recursive, refreshFrequency=args.refresh,
-                verboseMode=args.verbose, azureService=azureService)
+        zs = Zuschauer(paths=args.paths, filetypes=args.filetypes, storage=args.storage, recursive=args.recursive,
+                refreshFrequency=args.refresh, verboseMode=args.verbose, azureService=azureService)
         try:
             zs.run()
         except KeyboardInterrupt:
@@ -432,7 +447,29 @@ def main(args):
 
 
 if __name__ == "__main__":
-    # prepare options
-    args = parse_arguments()
+    load_from_config = True
+    # config file available
+    if load_from_config:
+        if CONFIGFILE.exists():
+            with open(CONFIGFILE, 'rt') as f:
+                t_args = argparse.Namespace()
+                try:
+                    t_args.__dict__.update(json.load(f))
+                    parser = argparse.ArgumentParser()
+                    args = parser.parse_args(namespace=t_args)
+                except:
+                    load_from_config = False
+                    pass
+
+    if not load_from_config:
+        # prepare options also if it fails
+        args = parse_arguments()
+
+    # persist config for restart
+    if args.save:
+        config = vars(args)
+        config['paths'] = [str(p) for p in args.paths]
+        with open(CONFIGFILE, 'w') as outfile:
+            json.dump(config, outfile)
 
     main(args) # upload already available files
