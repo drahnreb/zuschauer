@@ -30,85 +30,189 @@ CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 
 @Gooey
 def parse_arguments():
+    return _parse_arguments(gooey=True)
+
+def _parse_arguments(gooey=True):
+    # use arg parsing without gooey to enable help and enable/disable control of config loading
+    # gooey parameter disables 'required arguments' to pass first headless check for load arg
     parser = argparse.ArgumentParser(description='Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien.')
     
     requiredNamed = parser.add_argument_group('Required arguments')
     requiredNamed.add_argument(
         "-paths",
         "-p",
-        type=lambda p: Path(p).absolute(),
-        default=[Path(__file__).absolute().parent],
+        type=lambda p: Path(p),
+        default=[Path(__file__).resolve().parent] if gooey else None,
         nargs='+',
         help="Wurzelpfad(e)",
-        required=True
+        required=gooey
     )
     requiredNamed.add_argument(
         "-filetypes",
         "-f",
-        default='',
-        required=True,
-        help="Erlaubte Dateiendung(en), Semikolon-seperariert. Asterisk for all types.",
+        default='' if gooey else None,
+        required=gooey,
+        help="Erlaubte Dateiendung(en), Semikolon-seperariert. Asterisk or leave empty for all types.",
     )
     requiredNamed.add_argument(
         "--storage",
         "-a",
-        default=STORAGES[1],
+        default=STORAGES[1] if gooey else None,
         choices=STORAGES,
-        required=True,
+        required=gooey,
         help="Storage Option.",
     )
     requiredNamed.add_argument(
         "-connectionString",
         "-c",
-        required=True,
-        help="<AccountName=$$$;AccountKey=$$$;Path=$$$)> (für Azure Storage: ADLS Gen1/Blob Container - Pfad der Storage Ressource) oder Pfad für Netzwerklaufwerk.",
+        required=gooey,
+        help='"<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (für Azure Storage: ADLS Gen1/Blob Container - Pfad der Storage Ressource) oder Pfad für Netzwerklaufwerk.',
     )
     # optional
     parser.add_argument(
         "--proxy",
         "-y",
-        default='',
-        help="Semikolon separated Proxy URLs or IP Adresses for http;https format for each: 'http(s)://proxyURLorIP:proxyPort'",
+        default='' if gooey else None,
+        help='Semikolon separated Proxy URLs or IP Adresses for http;https format for each: "http(s)://proxyURLorIP:proxyPort"',
     )
     parser.add_argument(
         "--save",
         "-s",
         action='store_true',
-        default=True,
+        default=True if gooey else None,
         help="Save config for next startup.",
+    )
+    parser.add_argument(
+        "--load",
+        "-l",
+        default=CONFIGFILE,
+        type=lambda p: Path(p),
+        help="Specify path to config file that should be loaded",
     )
     parser.add_argument(
         "--refresh",
         "-x",
         type=int,
-        default=1,
+        default=1 if gooey else None,
         help="Refresh Frequency.",
     )
     parser.add_argument(
         "--recursive",
         "-r",
         action='store_true',
-        default=True,
+        default=True if gooey else None,
         help="Rekursive Ordnerpfade.",
     )
     parser.add_argument(
         "--verbose",
         "-v",
         action='store_true',
-        default=True,
+        default=True if gooey else None,
         help="Run in verbose mode.",
     )
     parser.add_argument(
-        "--load",
-        "-l",
+        "--dryrun",
+        "-d",
         action='store_true',
-        default=False,
-        help="Load config file. Run command first without this and --save option enabled to create an appropriate config file.",
+        default=False if gooey else None,
+        help="Create config file only. Use as a dry run to save config file and test connection without actually uploading anything.",
+    )
+    parser.add_argument(
+        "--existing",
+        "-e",
+        action='store_true',
+        default=True if gooey else None,
+        help="Upload existing files in specified paths.",
     )
     try:
-        return parser.parse_args()
+        if gooey:
+            return parser.parse_args()
+        else:
+            return parser
     except SystemExit as e:
         os._exit(e.code)
+
+
+def checkArgs(args):
+    # check Namespace
+    try:
+        _ = [args.paths, args.filetypes, args.connectionString, args.storage, args.proxy,\
+            args.save, args.refresh, args.recursive, args.verbose, args.dryrun, args.existing]
+    except AttributeError as e:
+        print(f"Argument in config not set correctly: \n{e}")
+        exit(1)
+        
+    # check rest of required args
+    if not len(args.paths) or not isinstance(args.paths, list):
+        print(f"{args.paths} not set correctly.")
+        exit(1)
+    else:
+        for p in args.paths:
+            try:
+                assert Path(p).is_absolute()
+            except:
+                print(f"{p} is not a valid path on this system. Provide an absolute path.")
+                exit(1)
+    if not len(args.filetypes):
+        print(f"{args.filetypes} not set correctly.")
+        exit(1)
+
+    # check if connection string arg, if correct init storageService to be passed to watchdog
+    out, err, pathToDestination, storageService = '', '', '', None
+    connString = args.connectionString
+    if all([s in connString for s in ["AccountName=","AccountKey=","Path=",";"]]):
+        split = connString.split(';', 2)
+        if len(split) == 3:
+            # parse connection string
+            r = re.search("AccountName=(.*);AccountKey=(.*);Path=(.*)", connString)
+            AccountName = r.group(1)
+            AccountKey = r.group(2)
+            pathToDestination = r.group(3)
+            # get proxy settings
+            if len(args.proxy) and ';' in args.proxy:
+                http_proxy, https_proxy = args.proxy.split(';', 1)
+                proxy = dict(http_proxy=http_proxy, https_proxy=https_proxy)
+            else:
+                proxy = None
+
+            if pathToDestination:
+                if args.storage == STORAGES[0]:
+                    # ADLS
+                    # TODO: proxy
+                    if not pathToDestination.startswith('/'):
+                        pathToDestination = '/' + pathToDestination
+                    # check connection
+                    cmd = f'az dls fs list --account {AccountName} --path "{pathToDestination}"'
+                    failed, out, err = run_cli_command(cmd)
+                    if failed:
+                        print("Did you set up azure-cli? Install and run az login in a shell: https://aka.ms/cli")
+                        print("Otherwise either connection string invalid, or check proxy settings.")
+                        exit(1)
+                    else:
+                        storageService = [f'az dls fs upload --account {AccountName} --source-path ', f' --destination-path "/{pathToDestination}/']
+                elif args.storage == STORAGES[1]:
+                    # BLOB
+                    # init
+                    ac = AzureStorageContainer(connection_string=f"AccountName={AccountName};AccountKey={AccountKey}",
+                        container_name=pathToDestination, proxy=proxy)
+                    # check connection
+                    if not ac.connected:
+                        print("Cannot connect to Azure Blob Service.")
+                    else:
+                        storageService = ac
+                # TODO: implement the rest of the storage options
+                else:
+                    raise NotImplementedError
+            else:
+                print("Path in Connection String not set (correctly).")
+        else:
+            print("Check connection string. Format of connection string of Azure Dashboard not yet supported.")
+
+    if storageService is None:
+        print("A connection to storage option could not be established.")
+        exit(1)
+    
+    return storageService
 
 
 def run_cli_command(cmd):
@@ -201,7 +305,7 @@ class AzureStorageContainer():
 
     def save_block_blob(self, path: Path, asynced: bool=False, overwrite: bool=False):
         failed = True
-        path = path.absolute()
+        path = path.resolve()
         if path.exists() and path.is_file():
             self.bsc = self._bsc(asynced=asynced)
             if asynced:
@@ -254,17 +358,16 @@ class Zuschauer(FileSystemEventHandler):
         ]))
 
     def __init__(self, paths, filetypes, storage, recursive=True, refreshFrequency=1,
-            verboseMode=True, azureService=None,
+            verboseMode=True, storageService=None,
             triggerActionAtStart=False # upload already available files
         ):
-        self.inputPaths = paths
-        self.paths = {Path(p).absolute():p for p in self.inputPaths}
-        self.filetypes = ['.'+f for f in filetypes.split(';')]
+        self.paths = paths
+        self.filetypes = filetypes
         self.storage = storage
         self.recursive = recursive
         self.verboseMode = verboseMode
         self.refreshFrequency = refreshFrequency
-        self.azureService = azureService
+        self.storageService = storageService
         self.observer = Observer(timeout=0.1)
 
         for p in self.paths:
@@ -277,9 +380,9 @@ class Zuschauer(FileSystemEventHandler):
         stdout = open(os.devnull, 'wb') if self.verboseMode else None
         if self.storage == STORAGES[0]:
             # ADLS
-            if isinstance(self.azureService, list):
+            if isinstance(self.storageService, list):
                 # f'az dls fs upload --account {AccountName} --source-path {changedFile} --destination-path "/{pathToDestination}/{changedFile.stem}"'
-                cmd = self.azureService[0]+str(changedFile)+self.azureService[1]+str(changedFile.stem)+'"'
+                cmd = self.storageService[0]+str(changedFile)+self.storageService[1]+str(changedFile.stem)+'"'
                 failed, _, _ = run_cli_command(cmd)
             else:
                 failed = True
@@ -288,7 +391,7 @@ class Zuschauer(FileSystemEventHandler):
             raise NotImplementedError
         else:
             # Blob
-            failed = self.azureService.save_block_blob(path=changedFile, overwrite=overwrite)
+            failed = self.storageService.save_block_blob(path=changedFile, overwrite=overwrite)
 
         now = arrow.now()
         if self.verboseMode:
@@ -317,7 +420,7 @@ class Zuschauer(FileSystemEventHandler):
     def on_change(self, path, overwrite=False):
         path = Path(path)
         if self.is_interested(path):
-            if path.is_file() and path.suffix in self.filetypes or '*' in self.filetypes:
+            if path.is_file() and (path.suffix in self.filetypes or '*' in self.filetypes or '.' in self.filetypes):
                 self.execAction(path, overwrite)
 
     def on_created(self, event):
@@ -364,7 +467,7 @@ class Zuschauer(FileSystemEventHandler):
         self.observer.join()
 
 
-def main(args):
+def main(args, storageService):
     # Create a logger for the 'azure.storage.blob' SDK
     logger = logging.getLogger(args.storage)
     logger.setLevel(logging.DEBUG)
@@ -372,104 +475,96 @@ def main(args):
     handler = logging.StreamHandler(stream=sys.stdout)
     logger.addHandler(handler)
 
-    # check if connection string arg, if correct init azureService to be passed to watchdog
-    failed, out, err, pathToDestination, azureService = True, '', '', '', None
-    connString = args.connectionString
-    if all([s in connString for s in ["AccountName=","AccountKey=","Path=",";"]]):
-        split = connString.split(';', 2)
-        if len(split) == 3:
-            # parse connection string
-            r = re.search("AccountName=(.*);AccountKey=(.*);Path=(.*)", connString)
-            AccountName = r.group(1)
-            AccountKey = r.group(2)
-            pathToDestination = r.group(3)
-            # get proxy settings
-            if len(args.proxy) and ';' in args.proxy:
-                http_proxy, https_proxy = args.proxy.split(';', 1)
-                proxy = dict(http_proxy=http_proxy, https_proxy=https_proxy)
-            else:
-                proxy = None
+    filetypes = ['.'+f for f in args.filetypes.split(';')]
+    paths = {Path(p).resolve():p for p in args.paths}
 
-            if pathToDestination:
-                if args.storage == STORAGES[0]:
-                    # ADLS
-                    # TODO: proxy
-                    if not pathToDestination.startswith('/'):
-                        pathToDestination = '/' + pathToDestination
-                    # check connection
-                    cmd = f'az dls fs list --account {AccountName} --path "{pathToDestination}"'
-                    failed, out, err = run_cli_command(cmd)
-                    if failed:
-                        print("Did you set up azure-cli? Install and run az login in a shell: https://aka.ms/cli")
-                        print("Otherwise either connection string invalid, or check proxy settings.")
-                        exit(1)
-                    else:
-                        azureService = [f'az dls fs upload --account {AccountName} --source-path ', f' --destination-path "/{pathToDestination}/']
-                elif args.storage == STORAGES[1]:
-                    # BLOB
-                    # init 
-                    ac = AzureStorageContainer(connection_string=f"AccountName={AccountName};AccountKey={AccountKey}",
-                        container_name=pathToDestination, proxy=proxy)
-                    # check connection
-                    if not ac.connected:
-                        print("Cannot connect to Azure Blob Service.")
-                    else:
-                        failed = False
-                        azureService = ac
-                # TODO: implement the rest of the storage options
-                else:
-                    raise NotImplementedError
-            else:
-                print("Path in Connection String not set (correctly).")
+    # create watchdog service
+    zs = Zuschauer(paths=paths, filetypes=filetypes, storage=args.storage, recursive=args.recursive,
+            refreshFrequency=args.refresh, verboseMode=args.verbose, storageService=storageService)
+
+    # upload already available files
+    if args.existing:
+        if args.verbose:
+            print(f"""-----------------\nUpload {'recursively' if args.recursive else ''} already existing files in:
+                Paths: {list(paths.keys())}, with \nFiletypes: {filetypes}, to \nStorage: {args.storage}
+            """)
+        existing_files = {}
+        nExist = 0
+        for path in paths.keys():
+            for ft in filetypes:
+                foundExistingFiles = list(path.glob(f"{'*' if args.recursive else ''}*/*"+ft))
+                nExistingFiles = len(foundExistingFiles)
+                if nExistingFiles:
+                    existing_files[path] = foundExistingFiles
+        if len(existing_files):
+            for existingFiles in existing_files.values():
+                for file_ in existingFiles:
+                    if file_.is_file():
+                        # upload with non-overwriting flag set to boost upload
+                        zs.execAction(file_, overwrite=False)
         else:
-            print("Check connection string. Format of connection string of Azure Dashboard not yet supported.")
-
-    if not failed and azureService is not None:
+            print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
+    try:
         if args.verbose:
             print(f"""Starting watchdog with config:
-                \nPaths: {args.paths}, \nFiletypes: {args.filetypes}, \nStorage: {args.storage}
-                \nRefreshRate: {args.refresh}, \nRecursive: {args.recursive}
+                \nPaths: {list(paths.keys())}, \nFiletypes: {filetypes}, \nStorage: {args.storage}, \nRefreshRate: {args.refresh}
             """)
-            print(f"Schaue {'rekursiv' if args.recursive else ''} auf {args.paths}, bei Dateierstellung wird auf {args.storage} kopiert.")
+            print(f"Schaue {'rekursiv' if args.recursive else ''} auf {list(paths.keys())}, bei Dateierstellung wird auf {args.storage} kopiert.")
+        # start watchdog service 
         # watch filesystem for file creation
-        # subdirs are create per day
-        # in those subdirs are files created
-        zs = Zuschauer(paths=args.paths, filetypes=args.filetypes, storage=args.storage, recursive=args.recursive,
-                refreshFrequency=args.refresh, verboseMode=args.verbose, azureService=azureService)
-        try:
-            zs.run()
-        except KeyboardInterrupt:
-            print('^C')
-            exit(0)
-    else:
-        print("A connection to storage option could not be established.")
-        exit(1)
+        zs.run()
+    except KeyboardInterrupt:
+        print('^C')
+        exit(0)
 
 
 if __name__ == "__main__":
-    load_from_config = True
-    # config file available
-    if load_from_config:
-        if CONFIGFILE.exists():
-            with open(CONFIGFILE, 'rt') as f:
-                t_args = argparse.Namespace()
-                try:
-                    t_args.__dict__.update(json.load(f))
-                    parser = argparse.ArgumentParser()
-                    args = parser.parse_args(namespace=t_args)
-                except:
-                    load_from_config = False
-                    pass
+    # headless arg parsing
+    parser = _parse_arguments(gooey=False)
+    _args = parser.parse_args()
+    configFile = _args.load
 
-    if not load_from_config:
-        # prepare options also if it fails
+    # config file available
+    if configFile.exists() and configFile.is_file():
+        print(f'Loading config from file {configFile}')
+        with open(configFile, 'rt') as f:
+            t_args = argparse.Namespace()
+            try:
+                configItems = json.load(f)
+                # add config options that are not necessary to be specified in config file but need to be initialized
+                for k in ["save", "existing", "dryrun"]:
+                    if k not in configItems.keys():
+                        configItems[k] = False
+                # consume current flags
+                for k,v in _args.__dict__.items():
+                    if not v is None and 'load' not in k:
+                        configItems[k] = v
+                t_args.__dict__.update(configItems)
+                args = parser.parse_args(namespace=t_args)
+            except BaseException as e:
+                print(e)
+                print("Loading from config failed.")
+                # if loading fails, prepare gooey interface
+                args = parse_arguments()
+    else:
+        # ask for config, prepare gooey interface
         args = parse_arguments()
 
-    # persist config for restart
-    if args.save:
-        config = vars(args)
-        config['paths'] = [str(p) for p in args.paths]
-        with open(CONFIGFILE, 'w') as outfile:
-            json.dump(config, outfile)
+    # check args including storage client and set up storageService
+    storageService = checkArgs(args)
 
-    main(args) # upload already available files
+    if storageService is not None:
+        # persist config for restart
+        if args.save:
+            config = vars(args).copy()
+            config['paths'] = [str(p) for p in args.paths]
+            config['dryrun'] = False
+            [config.pop(k, None) for k in ['save', 'load', 'existing']]
+            with open(CONFIGFILE, 'w') as outfile:
+                json.dump(config, outfile)
+        # run watchdog
+        if not args.dryrun:
+            main(args, storageService)
+    else:
+        print("Arguments are wrong. Config not saved. Nothing uploaded. \n\nExit.")
+        exit(1)
