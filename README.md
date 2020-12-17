@@ -1,13 +1,14 @@
 # zuschauer
 IoT simplified - watchdog + azure storage blob
 
+![Zuschauer by Bernhard Häußler](/../media/screenshot.png?raw=true "Screenshot of Zuschauer")
+
 ## Usage
 Easiest configuration is via gooey, first configure with via the interface:
 ```bash
 python zuschauer.py
 ```
 Specify required (and optional) arguments in interface.
-
 
 By default, `zuschauer` is saving a JSON-config file if arguments are correct and connection can be established.
 That enables a headless mode: Just run it a second time (after configuration) and it will automatically load all pre-configured details.
@@ -35,3 +36,8 @@ python zuschauer.py -h
 ## Upcoming features:
 * concurrent upload of existing files and zs.run()
 * implement on-premise location (file share)
+* fix localization
+
+
+## Author
+Bernhard Häußler, TU Berlin
