@@ -48,7 +48,7 @@ def parse_arguments():
 def _parse_arguments(gooey=True):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
-    parser = argparse.ArgumentParser(description=f'Zuschauer - Filesystem watchdog to copy data to remote storage and enable IoT. (by {__author__} \tv.{__version__})')
+    parser = argparse.ArgumentParser(description=f'Zuschauer - Filesystem watchdog to copy data to remote storage and enable IoT.\tby {__author__}\tv.{__version__}')
     
     requiredNamed = parser.add_argument_group('Required arguments')
     requiredNamed.add_argument(
@@ -93,7 +93,7 @@ def _parse_arguments(gooey=True):
         "-s",
         action='store_true',
         default=True if gooey else None,
-        help="Save config for next startup.",
+        help="Save JSON config for next startup or headless mode. (CAUTION: credentials are stored in plain text!)",
     )
     parser.add_argument(
         "--load",
@@ -128,7 +128,7 @@ def _parse_arguments(gooey=True):
         "-d",
         action='store_true',
         default=False if gooey else None,
-        help="Create config file only. Use as a dry run to save config file and test connection without actually uploading anything.",
+        help="Use as a dry run to save config file and test connection without actually uploading anything. E.g. use to create JSON config file only.",
     )
     parser.add_argument(
         "--existing",

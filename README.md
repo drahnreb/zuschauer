@@ -1,10 +1,11 @@
 # zuschauer
 IoT simplified - watchdog + azure storage blob
+(*Der Zuschauer dt. - spectator*)
 
 ![Zuschauer by Bernhard Häußler](/../media/screenshot.png?raw=true "Screenshot of Zuschauer")
 
 ## Function
-Watch (*Der Zuschauer dt. - spectator*) a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future).
+Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future).
 Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
 
 ## Usage
@@ -27,7 +28,7 @@ It will not overwrite already uploaded files.
 python zuschauer.py --existing
 ```
 __Use with caution__:
-This saves also credentials on disk.
+This saves credentials on disk.
 
 Zuschauer looks for a .config file in its root. If necessary, refer to any other path with `--load`:
 ```bash
@@ -40,6 +41,7 @@ python zuschauer.py -h
 ```
 
 ## Upcoming features:
+* dockerize
 * concurrent upload of existing files and zs.run()
 * implement on-premise location (file share)
 
