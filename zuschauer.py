@@ -48,7 +48,7 @@ def parse_arguments():
 def _parse_arguments(gooey=True):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
-    parser = argparse.ArgumentParser(description=f'Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien. (by {__author__} \tv.{__version__})')
+    parser = argparse.ArgumentParser(description=f'Zuschauer - Filesystem watchdog to copy data to remote storage and enable IoT. (by {__author__} \tv.{__version__})')
     
     requiredNamed = parser.add_argument_group('Required arguments')
     requiredNamed.add_argument(
@@ -57,7 +57,7 @@ def _parse_arguments(gooey=True):
         type=lambda p: Path(p),
         default=[Path(__file__).resolve().parent] if gooey else None,
         nargs='+',
-        help="Wurzelpfad(e)",
+        help="Root path(s)",
         required=gooey
     )
     requiredNamed.add_argument(
@@ -65,7 +65,7 @@ def _parse_arguments(gooey=True):
         "-f",
         default='' if gooey else None,
         required=gooey,
-        help="Erlaubte Dateiendung(en), Semikolon-seperariert. Asterisk or leave empty for all types.",
+        help="Allowed file suffix(es), semicolon-separated. Asterisk or leave empty for all types.",
     )
     requiredNamed.add_argument(
         "--storage",
@@ -79,14 +79,14 @@ def _parse_arguments(gooey=True):
         "-connectionString",
         "-c",
         required=gooey,
-        help='"<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (für Azure Storage: ADLS Gen1/Blob Container - Pfad der Storage Ressource) oder Pfad für Netzwerklaufwerk.',
+        help='"<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (for Azure Storage: ADLS Gen1/Blob Container - Path of Storage Ressource) or path to network share.',
     )
     # optional
     parser.add_argument(
         "--proxy",
         "-y",
         default='' if gooey else None,
-        help='Semikolon separated Proxy URLs or IP Adresses for http;https format for each: "http(s)://proxyURLorIP:proxyPort"',
+        help="Semicolon separated Proxy URLs or IP Adresses for http;http(s) if proxy doesn't support https use http:// prefix twice\nformat: 'http://proxyURLorIP:proxyPort;http(s)://proxyURLorIP:proxyPort'",
     )
     parser.add_argument(
         "--save",
@@ -100,7 +100,7 @@ def _parse_arguments(gooey=True):
         "-l",
         default=CONFIGFILE,
         type=lambda p: Path(p),
-        help="Specify path to config file that should be loaded",
+        help="Specify path to JSON config file that should be used and loaded",
     )
     parser.add_argument(
         "--refresh",
@@ -114,7 +114,7 @@ def _parse_arguments(gooey=True):
         "-r",
         action='store_true',
         default=True if gooey else None,
-        help="Rekursive Ordnerpfade.",
+        help="Enable nested paths (deep changes) and check root paths recursively.",
     )
     parser.add_argument(
         "--verbose",
@@ -486,7 +486,6 @@ class Zuschauer(FileSystemEventHandler):
 
 
 def main(args, storageService):
-    print(f"Zuschauer by {__author__} \t v.{__version__}")
     # Create a logger for the 'azure.storage.blob' SDK
     logger = logging.getLogger(args.storage)
     logger.setLevel(logging.DEBUG)
@@ -531,7 +530,7 @@ def main(args, storageService):
             print(f"""Starting watchdog with config:
                 \nPaths: {list(paths.keys())}, \nFiletypes: {filetypes}, \nStorage: {args.storage}, \nRefreshRate: {args.refresh}
             """)
-            print(f"Schaue {'rekursiv' if args.recursive else ''} auf {list(paths.keys())}, bei Dateierstellung {'würde (--dryrun aktiv)' if args.dryrun else 'wird'} auf {args.storage} kopiert.")
+            print(f"Watch {'recursively' if args.recursive else ''} {list(paths.keys())}, action on file change {'would (--dryrun aktiv)' if args.dryrun else 'will'} copy on / overwrite in {args.storage}.")
         # start watchdog service 
         # watch filesystem for file creation
         zs.run()
@@ -541,6 +540,7 @@ def main(args, storageService):
 
 
 if __name__ == "__main__":
+    print(f"Zuschauer\n\tby {__author__}\n\tv.{__version__}\n\n")
     # headless arg parsing
     parser = _parse_arguments(gooey=False)
     _args = parser.parse_args()

@@ -42,8 +42,6 @@ python zuschauer.py -h
 ## Upcoming features:
 * concurrent upload of existing files and zs.run()
 * implement on-premise location (file share)
-* fix localization
-
 
 ## Author
 Bernhard Häußler, TU Berlin
