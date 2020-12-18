@@ -1,3 +1,4 @@
 azure-storage-blob==12.6.0
 watchdog==0.10.4
 gooey==1.0.7
+arrow==0.17.0
