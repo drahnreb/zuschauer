@@ -48,7 +48,7 @@ def parse_arguments():
 def _parse_arguments(gooey=True):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
-    parser = argparse.ArgumentParser(description=f'Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien. (v.{__version__})')
+    parser = argparse.ArgumentParser(description=f'Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien. (by {__author__} \tv.{__version__})')
     
     requiredNamed = parser.add_argument_group('Required arguments')
     requiredNamed.add_argument(
@@ -486,7 +486,7 @@ class Zuschauer(FileSystemEventHandler):
 
 
 def main(args, storageService):
-    print(f"Zuschauer by v.{__version__}")
+    print(f"Zuschauer by {__author__} \t v.{__version__}")
     # Create a logger for the 'azure.storage.blob' SDK
     logger = logging.getLogger(args.storage)
     logger.setLevel(logging.DEBUG)
