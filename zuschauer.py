@@ -1,12 +1,18 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-Copyright (c) 2020, Bernhard Häußler.
-License: BSD, see LICENSE for more details.
-"""
-# https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
-# https://github.com/Azure/azure-sdk-for-python/tree/master/sdk/storage/azure-storage-blob
-
+__author__ = "Bernhard Häußler"
+__copyright__   = "Copyright (c) 2020"
 __version__ = 0.2
+__license__ = "BSD"
+__maintainer__ = "Bernhard Häußler"
+__email__ = "@drahnreb"
+__status__ = "Production"
+
+"""
+    Zuschauer (*der Zuschauer dt. - spectator*) - 
+    Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future).
+    Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
+"""
 
 from gooey import Gooey
 import argparse
@@ -24,6 +30,9 @@ import subprocess
 import sys
 import json
 
+# uses official Azure SDK for python
+# https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
+# https://github.com/Azure/azure-sdk-for-python/tree/master/sdk/storage/azure-storage-blob
 from azure.storage.blob._shared.base_client import create_configuration
 from azure.storage.blob.aio import BlobServiceClient as BlobServiceClientAIO
 from azure.storage.blob import BlobServiceClient
@@ -39,7 +48,7 @@ def parse_arguments():
 def _parse_arguments(gooey=True):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
-    parser = argparse.ArgumentParser(description='Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien.')
+    parser = argparse.ArgumentParser(description=f'Zuschauer - Dateisystem watchdog für den Upload spezifischer Dateien. (v.{__version__})')
     
     requiredNamed = parser.add_argument_group('Required arguments')
     requiredNamed.add_argument(
@@ -477,6 +486,7 @@ class Zuschauer(FileSystemEventHandler):
 
 
 def main(args, storageService):
+    print(f"Zuschauer by v.{__version__}")
     # Create a logger for the 'azure.storage.blob' SDK
     logger = logging.getLogger(args.storage)
     logger.setLevel(logging.DEBUG)
