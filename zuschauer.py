@@ -5,6 +5,9 @@ License: BSD, see LICENSE for more details.
 """
 # https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
 # https://github.com/Azure/azure-sdk-for-python/tree/master/sdk/storage/azure-storage-blob
+
+__version__ = 0.2
+
 from gooey import Gooey
 import argparse
 from pathlib import Path
@@ -27,6 +30,7 @@ from azure.storage.blob import BlobServiceClient
 
 STORAGES = ["ADLS", "Blob", "onPrem"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
+PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
 
 @Gooey
 def parse_arguments():
@@ -358,14 +362,14 @@ class Zuschauer(FileSystemEventHandler):
         ]))
 
     def __init__(self, paths, filetypes, storage, recursive=True, refreshFrequency=1,
-            verboseMode=True, storageService=None,
-            triggerActionAtStart=False # upload already available files
+            verboseMode=True, dryRun=False, storageService=None
         ):
         self.paths = paths
         self.filetypes = filetypes
         self.storage = storage
         self.recursive = recursive
-        self.verboseMode = verboseMode
+        self.dryRun = dryRun
+        self.verboseMode = verboseMode if not self.dryRun else True
         self.refreshFrequency = refreshFrequency
         self.storageService = storageService
         self.observer = Observer(timeout=0.1)
@@ -376,8 +380,22 @@ class Zuschauer(FileSystemEventHandler):
                 self.observer.schedule(self, p, recursive=True)
 
     def execAction(self, changedFile, overwrite):
+        if self.verboseMode:
+            print_message = arrow.now().format('YYYY-MM-DD HH:mm:ss ZZ')
+            print_message += "\t'" + str(changedFile) + "'"
+            print_message += f"\t{'copy to' if not overwrite else 'overwrite in'} '" + self.storage + "'"
+            print('==> ' + print_message + ' <==')
+
+        # if dryRun active do not execute
+        if self.dryRun:
+            # sleep 3 secs to emulate long upload
+            time.sleep(3)
+            print(f"## would have {'copied' if not overwrite else 'overwritten'}.\nbut --dryrun enabled; no action executed.")
+            return
+
         failed = True
         stdout = open(os.devnull, 'wb') if self.verboseMode else None
+
         if self.storage == STORAGES[0]:
             # ADLS
             if isinstance(self.storageService, list):
@@ -393,33 +411,30 @@ class Zuschauer(FileSystemEventHandler):
             # Blob
             failed = self.storageService.save_block_blob(path=changedFile, overwrite=overwrite)
 
-        now = arrow.now()
-        if self.verboseMode:
-            print_message = "'" + str(changedFile)
-            print_message += ' at ' + arrow.now().format('YYYY-MM-DD HH:mm:ss ZZ')
-            print_message += ", running '" + self.storage + "'"
-            print('==> ' + print_message + ' <==')
-        print("Success:  ", not(failed))
+        print(f"$$ Successfully copied: {str(changedFile)}" if not(failed) else f"## Failed copying: {str(changedFile)}")
 
-    def is_interested(self, path):
-        print(path)
+    def is_interested(self, path: Path, recursive: bool = False):
         if self.exclude.match(str(path)):
             return False
 
-        if path in self.paths:
+        # a path or file in watched paths
+        if path in self.paths or (path.is_file() and path.parent in self.paths):
             return True
 
-        if self.recursive:
-            while path.parent.absolute() != path:
-                path = path.parent.absolute()
-                if path in self.paths:
+        if recursive:
+            while path.parent != path:
+                # walk up towards path's root until we reach root
+                path = path.parent
+                if self.is_interested(path, recursive=False):
                     return True
-            
+
         return False
 
     def on_change(self, path, overwrite=False):
         path = Path(path)
-        if self.is_interested(path):
+        if self.is_interested(path, recursive=self.recursive):
+            # print("interesting file")
+            # print("\nis file: ", path.is_file(), '\nsuffix: ', path.suffix, '\nin filetypes: ', path.suffix in self.filetypes)
             if path.is_file() and (path.suffix in self.filetypes or '*' in self.filetypes or '.' in self.filetypes):
                 self.execAction(path, overwrite)
 
@@ -432,30 +447,24 @@ class Zuschauer(FileSystemEventHandler):
             print('created dir ', event.src_path)
             self.on_change(event.src_path)
         else:
-            if not Path(event.src_path).stem.startswith('.'):
-                print('created file')
-                self.on_change(event.src_path)
+            self.on_change(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            if not Path(event.src_path).stem.startswith('.'):
-                pass
-                print(event.src_path, ' modified')
-                self.on_change(event.src_path, overwrite=True)
+            time.sleep(PAUSEAFTERMODIFIED)
+            self.on_change(event.src_path, overwrite=True)
 
     def on_moved(self, event):
         if not event.is_directory:
-            if not Path(event.src_path).stem.startswith('.'):
-                pass
-                # print(event.src_path, ' file_moved')
-                # self.on_change(event.dest_path)
+            pass
+            # print(event.src_path, ' file_moved')
+            # self.on_change(event.dest_path)
 
     def on_deleted(self, event):
         if not event.is_directory:
-            if not Path(event.src_path).stem.startswith('.'):
-                pass
-                # print(event.src_path, ' file_deleted')
-                # self.on_change(event.src_path)
+            pass
+            # print(event.src_path, ' file_deleted')
+            # self.on_change(event.src_path)
 
     def run(self):    
         self.observer.start()
@@ -475,12 +484,12 @@ def main(args, storageService):
     handler = logging.StreamHandler(stream=sys.stdout)
     logger.addHandler(handler)
 
-    filetypes = ['.'+f for f in args.filetypes.split(';')]
+    filetypes = ['.'+f if not f.startswith('.') else f for f in args.filetypes.split(';')]
     paths = {Path(p).resolve():p for p in args.paths}
 
     # create watchdog service
     zs = Zuschauer(paths=paths, filetypes=filetypes, storage=args.storage, recursive=args.recursive,
-            refreshFrequency=args.refresh, verboseMode=args.verbose, storageService=storageService)
+            refreshFrequency=args.refresh, verboseMode=args.verbose, dryRun=args.dryrun, storageService=storageService)
 
     # upload already available files
     if args.existing:
@@ -497,11 +506,14 @@ def main(args, storageService):
                 if nExistingFiles:
                     existing_files[path] = foundExistingFiles
         if len(existing_files):
-            for existingFiles in existing_files.values():
-                for file_ in existingFiles:
-                    if file_.is_file():
-                        # upload with non-overwriting flag set to boost upload
-                        zs.execAction(file_, overwrite=False)
+            if args.verbose or args.dryrun:
+                print(f"Uploading a total of {len(existing_files)} existing files.")
+            if not args.dryrun:
+                for existingFiles in existing_files.values():
+                    for file_ in existingFiles:
+                        if file_.is_file():
+                            # upload with non-overwriting flag set to boost upload
+                            zs.execAction(file_, overwrite=False)
         else:
             print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
     try:
@@ -509,7 +521,7 @@ def main(args, storageService):
             print(f"""Starting watchdog with config:
                 \nPaths: {list(paths.keys())}, \nFiletypes: {filetypes}, \nStorage: {args.storage}, \nRefreshRate: {args.refresh}
             """)
-            print(f"Schaue {'rekursiv' if args.recursive else ''} auf {list(paths.keys())}, bei Dateierstellung wird auf {args.storage} kopiert.")
+            print(f"Schaue {'rekursiv' if args.recursive else ''} auf {list(paths.keys())}, bei Dateierstellung {'würde (--dryrun aktiv)' if args.dryrun else 'wird'} auf {args.storage} kopiert.")
         # start watchdog service 
         # watch filesystem for file creation
         zs.run()
@@ -563,8 +575,7 @@ if __name__ == "__main__":
             with open(CONFIGFILE, 'w') as outfile:
                 json.dump(config, outfile)
         # run watchdog
-        if not args.dryrun:
-            main(args, storageService)
+        main(args, storageService)
     else:
         print("Arguments are wrong. Config not saved. Nothing uploaded. \n\nExit.")
         exit(1)
