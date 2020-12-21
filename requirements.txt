@@ -1,4 +1,7 @@
+python==3.7.9
 azure-storage-blob==12.6.0
-watchdog==0.10.4
-gooey==1.0.7
+watchdog==1.0.2
+gooey==1.0.8
 arrow==0.17.0
+keyring==21.5.0
+pywin32
