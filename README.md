@@ -4,9 +4,11 @@ IoT simplified - watchdog + azure storage blob
 
 ![Zuschauer by Bernhard Häußler](/../media/screenshot.png?raw=true "Screenshot of Zuschauer")
 
-## Function
-Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future).
+## Details
+Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future). Azure functionality is implemented by leveraging [Azure Blob Storage Python SDK](https://github.com/Azure/azure-sdk-for-python).
+The AzureBlobFileSystem accepts [all of the Async BlobServiceClient arguments](https://docs.microsoft.com/en-us/azure/storage/blobs/storage-quickstart-blobs-python).
 Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
+By default, write operations create BlockBlobs in Azure, which, once written can not be appended.
 
 ## Usage
 Easiest configuration is via gooey, first configure with via the interface:
@@ -27,12 +29,14 @@ It will not overwrite already uploaded files.
 ```bash
 python zuschauer.py --existing
 ```
-__Use with caution__:
-This saves credentials on disk.
 
 Zuschauer looks for a .config file in its root. If necessary, refer to any other path with `--load`:
 ```bash
 python zuschauer.py --load 'path/to/config.ajsonfile'
+```
+Example `config.ajsonfile`:
+``` json
+{"paths": ["/path/to/watched_folder", "/second/path/to/watched_folder"], "filetypes": "pdf;tex", "storage": "Blob", "proxy": "", "refresh": 1, "recursive": true, "verbose": true, "dryrun": false}
 ```
 
 Every other option is described via help:
