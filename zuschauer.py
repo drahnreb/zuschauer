@@ -14,10 +14,11 @@ __status__ = "Production"
     Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
 """
 
-from gooey import Gooey
+from gooey import Gooey, GooeyParser
 import argparse
 from pathlib import Path
 import os
+import platform
 import sys
 import time
 import logging
@@ -29,6 +30,20 @@ import arrow
 import subprocess
 import sys
 import json
+
+import keyring
+STORECREDENTIALS = False
+try:
+    if platform.system() == "Windows":
+        import pywin32
+        STORECREDENTIALS = True
+    elif platform.system() == "Linux":
+        import secretstorage
+        STORECREDENTIALS = True
+    else:
+        STORECREDENTIALS = True
+except ImportError:
+    print("Cannot use keyring features. Won't be able to store credentials")
 
 # uses official Azure SDK for python
 # https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
@@ -42,10 +57,140 @@ CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
 
 @Gooey
-def parse_arguments():
-    return _parse_arguments(gooey=True)
+def parse_arguments(defaults):
+    # use arg parsing without gooey to enable help and enable/disable control of config loading
+    # gooey parameter disables 'required arguments' to pass first headless check for load arg
+    parser = GooeyParser(description=f'Zuschauer - Filesystem watchdog to copy data to remote storage and enable IoT.\tby {__author__}\tv.{__version__}')
+    
+    requiredNamed = parser.add_argument_group('Required arguments')
+    requiredNamed.add_argument(
+        "-paths",
+        "-p",
+        type=lambda p: Path(p),
+        default=[Path(__file__).resolve().parent],
+        nargs='+',
+        help="Root path(s)",
+        required=True,
+        gooey_options={
+            'initial_value': defaults.get('paths', [Path(__file__).resolve().parent])  
+        }
+    )
+    requiredNamed.add_argument(
+        "-filetypes",
+        "-f",
+        default='',
+        required=True,
+        help="Allowed file suffix(es), semicolon-separated. Asterisk or leave empty for all types.",
+        gooey_options={
+            'initial_value': defaults.get('filetypes', '')  
+        }
+    )
+    requiredNamed.add_argument(
+        "--storage",
+        "-a",
+        default=STORAGES[1],
+        choices=STORAGES,
+        required=True,
+        help="Storage Option.",
+        gooey_options={
+            'initial_value': defaults.get('storage', STORAGES[1])  
+        }
+    )
+    requiredNamed.add_argument(
+        "-connectionString",
+        "-c",
+        required=True,
+        help='"<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (for Azure Storage: ADLS Gen1/Blob Container - Path of Storage Ressource) or path to network share.',
+        gooey_options={
+            'initial_value': defaults.get('connectionString', "")  
+        }
+    )
+    # optional
+    parser.add_argument(
+        "--proxy",
+        "-y",
+        default='',
+        help="Semicolon separated Proxy URLs or IP Adresses for http;http(s) if proxy doesn't support https use http:// prefix twice\nformat: 'http://proxyURLorIP:proxyPort;http(s)://proxyURLorIP:proxyPort'",
+        gooey_options={
+            'initial_value': defaults.get('proxy', "")  
+        }
+    )
+    parser.add_argument(
+        "--save",
+        "-s",
+        action='store_true',
+        default=True,
+        help="Save JSON config for next startup or headless mode. (Credentials are stored in keyring)",
+        gooey_options={
+            'initial_value': defaults.get('save', True)  
+        }
+    )
+    parser.add_argument(
+        "--load",
+        "-l",
+        default=CONFIGFILE,
+        type=lambda p: Path(p),
+        help="Specify path to JSON config file that should be used and loaded",
+        gooey_options={
+            'initial_value': defaults.get('load', CONFIGFILE)  
+        }
+    )
+    parser.add_argument(
+        "--refresh",
+        "-x",
+        type=int,
+        default=1,
+        help="Refresh Frequency.",
+        gooey_options={
+            'initial_value': defaults.get('refresh', 1)  
+        }
+    )
+    parser.add_argument(
+        "--recursive",
+        "-r",
+        action='store_true',
+        default=True,
+        help="Enable nested paths (deep changes) and check root paths recursively.",
+        gooey_options={
+            'initial_value': defaults.get('recursive', True)  
+        }
+    )
+    parser.add_argument(
+        "--verbose",
+        "-v",
+        action='store_true',
+        default=True,
+        help="Run in verbose mode.",
+        gooey_options={
+            'initial_value': defaults.get('verbose', True)  
+        }
+    )
+    parser.add_argument(
+        "--dryrun",
+        "-d",
+        action='store_true',
+        default=False,
+        help="Use as a dry run to save config file and test connection without actually uploading anything. E.g. use to create JSON config file only.",
+        gooey_options={
+            'initial_value': defaults.get('dryrun', False)  
+        }
+    )
+    parser.add_argument(
+        "--existing",
+        "-e",
+        action='store_true',
+        default=True,
+        help="Upload existing files in specified paths.",
+        gooey_options={
+            'initial_value': defaults.get('existing', True)  
+        }
+    )
+    try:
+        return parser.parse_args()
+    except SystemExit as e:
+        os._exit(e.code)
 
-def _parse_arguments(gooey=True):
+def _parse_arguments(defaults={}, gooey=False):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
     parser = argparse.ArgumentParser(description=f'Zuschauer - Filesystem watchdog to copy data to remote storage and enable IoT.\tby {__author__}\tv.{__version__}')
@@ -224,7 +369,7 @@ def checkArgs(args):
     if storageService is None:
         print("A connection to storage option could not be established.")
         exit(1)
-    
+
     return storageService
 
 
@@ -542,12 +687,21 @@ def main(args, storageService):
 if __name__ == "__main__":
     print(f"Zuschauer\n\tby {__author__}\n\tv.{__version__}\n\n")
     # headless arg parsing
-    parser = _parse_arguments(gooey=False)
+    parser = _parse_arguments()
     _args = parser.parse_args()
     configFile = _args.load
 
-    # config file available
-    if configFile.exists() and configFile.is_file():
+    configItems = {}
+    # connectionString provided by arg?
+    connString = _args.connectionString
+    if connString is None and STORECREDENTIALS:
+        # connectionString saved in keyring?
+        connString = keyring.get_password("zuschauer@drahnreb", f"zs_connectionString_{platform.node()}")
+    configItems["connectionString"] = connString
+
+    # config file available and connection string was retrieved (keyring or arg)
+    if configFile.exists() and configFile.is_file() and configItems["connectionString"] is not None:
+        print("retrieved connectionString: ", configItems["connectionString"])
         print(f'Loading config from file {configFile}')
         with open(configFile, 'rt') as f:
             t_args = argparse.Namespace()
@@ -564,13 +718,12 @@ if __name__ == "__main__":
                 t_args.__dict__.update(configItems)
                 args = parser.parse_args(namespace=t_args)
             except BaseException as e:
-                print(e)
-                print("Loading from config failed.")
+                print("Loading from config failed.", e)
                 # if loading fails, prepare gooey interface
-                args = parse_arguments()
+                args = parse_arguments(configItems)
     else:
         # ask for config, prepare gooey interface
-        args = parse_arguments()
+        args = parse_arguments(configItems)
 
     # check args including storage client and set up storageService
     storageService = checkArgs(args)
@@ -578,10 +731,12 @@ if __name__ == "__main__":
     if storageService is not None:
         # persist config for restart
         if args.save:
+            if STORECREDENTIALS:
+                keyring.set_password("zuschauer@drahnreb", f"zs_connectionString_{platform.node()}", str(args.connectionString))
             config = vars(args).copy()
             config['paths'] = [str(p) for p in args.paths]
             config['dryrun'] = False
-            [config.pop(k, None) for k in ['save', 'load', 'existing']]
+            [config.pop(k, None) for k in ['save', 'load', 'existing', 'connectionString']]
             with open(CONFIGFILE, 'w') as outfile:
                 json.dump(config, outfile)
         # run watchdog
