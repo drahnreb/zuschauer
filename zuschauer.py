@@ -22,6 +22,7 @@ import platform
 import sys
 import time
 import logging
+import tempfile
 from watchdog.observers import Observer
 from watchdog.events import LoggingEventHandler
 from watchdog.events import FileSystemEventHandler
@@ -298,11 +299,13 @@ def checkArgs(args):
             args.save, args.refresh, args.recursive, args.verbose, args.dryrun, args.existing]
     except AttributeError as e:
         print(f"Argument in config not set correctly: \n{e}")
+        loggin.error(f"Argument in config not set correctly: \n{e}")
         exit(1)
         
     # check rest of required args
     if not len(args.paths) or not isinstance(args.paths, list):
         print(f"{args.paths} not set correctly.")
+        logging.error(f"{args.paths} not set correctly.")
         exit(1)
     else:
         for p in args.paths:
@@ -310,9 +313,11 @@ def checkArgs(args):
                 assert Path(p).is_absolute()
             except:
                 print(f"{p} is not a valid path on this system. Provide an absolute path.")
+                logging.ERROR(f"{p} is not a valid path on this system. Provide an absolute path.")
                 exit(1)
     if not len(args.filetypes):
         print(f"{args.filetypes} not set correctly.")
+        logging.error(f"{args.filetypes} not set correctly.")
         exit(1)
 
     # check if connection string arg, if correct init storageService to be passed to watchdog
@@ -365,9 +370,11 @@ def checkArgs(args):
                 print("Path in Connection String not set (correctly).")
         else:
             print("Check connection string. Format of connection string of Azure Dashboard not yet supported.")
+            raise NotImplementedError
 
     if storageService is None:
         print("A connection to storage option could not be established.")
+        logging.error("A connection to storage option could not be established.")
         exit(1)
 
     return storageService
@@ -381,6 +388,7 @@ def run_cli_command(cmd):
     if result.returncode:
         # failed
         print(">>>Tracelog: ", result.stderr, result.stdout, '\n')
+        logging.error(">>>Tracelog: ", result.stderr, result.stdout, '\n')
     return result.returncode, result.stdout, result.stderr
 
 
@@ -474,6 +482,7 @@ class AzureStorageContainer():
             self.bsc = None
         else:
             print(f"{path} does not exist or not a file.")
+            logging.error(f"{path} does not exist or not a file.")
 
         return failed
 
@@ -536,7 +545,7 @@ class Zuschauer(FileSystemEventHandler):
     def execAction(self, changedFile, overwrite):
         if self.verboseMode:
             print_message = arrow.now().format('YYYY-MM-DD HH:mm:ss ZZ')
-            print_message += "\t'" + str(changedFile) + "'"
+            print_message += "\t'" + str(changedFile.name) + "'"
             print_message += f"\t{'copy to' if not overwrite else 'overwrite in'} '" + self.storage + "'"
             print('==> ' + print_message + ' <==')
 
@@ -565,7 +574,8 @@ class Zuschauer(FileSystemEventHandler):
             # Blob
             failed = self.storageService.save_block_blob(path=changedFile, overwrite=overwrite)
 
-        print(f"$$ Successfully copied: {str(changedFile)}" if not(failed) else f"## Failed copying: {str(changedFile)}")
+        print(f"$$ Successfully {'copied' if not overwrite else 'overwritten'}: {str(changedFile.name)} {'to' if not overwrite else 'in'} {self.storage}" if not(failed) else f"## Failed copying: {str(changedFile.name)}")
+        logging.info(f"$$ Successfully {'copied' if not overwrite else 'overwritten'}: {str(changedFile.name)} {'to' if not overwrite else 'in'} {self.storage}" if not(failed) else f"## Failed copying: {str(changedFile.name)}")
 
     def is_interested(self, path: Path, recursive: bool = False):
         if self.exclude.match(str(path)):
@@ -598,7 +608,7 @@ class Zuschauer(FileSystemEventHandler):
         #     return
 
         if event.is_directory:
-            print('created dir ', event.src_path)
+            logging.info(f'created dir {event.src_path}')
             self.on_change(event.src_path)
         else:
             self.on_change(event.src_path)
@@ -631,13 +641,6 @@ class Zuschauer(FileSystemEventHandler):
 
 
 def main(args, storageService):
-    # Create a logger for the 'azure.storage.blob' SDK
-    logger = logging.getLogger(args.storage)
-    logger.setLevel(logging.DEBUG)
-    # Configure a console output
-    handler = logging.StreamHandler(stream=sys.stdout)
-    logger.addHandler(handler)
-
     filetypes = ['.'+f if not f.startswith('.') else f for f in args.filetypes.split(';')]
     paths = {Path(p).resolve():p for p in args.paths}
 
@@ -663,6 +666,7 @@ def main(args, storageService):
             if args.verbose or args.dryrun:
                 print(f"Uploading a total of {len(existing_files)} existing files.")
             if not args.dryrun:
+                logging.info(f"Uploading a total of {len(existing_files)} existing files.")
                 for existingFiles in existing_files.values():
                     for file_ in existingFiles:
                         if file_.is_file():
@@ -685,7 +689,11 @@ def main(args, storageService):
 
 
 if __name__ == "__main__":
-    print(f"Zuschauer\n\tby {__author__}\n\tv.{__version__}\n\n")
+    # create Tempfile
+    logging.basicConfig(filename=Path(tempfile.gettempdir()).joinpath("zuschauer.log"), level=logging.INFO,
+                        format='%(asctime)s-%(levelname)s: %(name)s "%(message)s"')
+
+    logging.info(f"Starte Zuschauer\tby {__author__}\tv.{__version__}")
     # headless arg parsing
     parser = _parse_arguments()
     _args = parser.parse_args()
@@ -697,16 +705,17 @@ if __name__ == "__main__":
     if connString is None and STORECREDENTIALS:
         # connectionString saved in keyring?
         connString = keyring.get_password("zuschauer@drahnreb", f"zs_connectionString_{platform.node()}")
+        if connString:
+            logging.info("retrieved connection string")
     configItems["connectionString"] = connString
 
     # config file available and connection string was retrieved (keyring or arg)
     if configFile.exists() and configFile.is_file() and configItems["connectionString"] is not None:
-        print("retrieved connectionString: ", configItems["connectionString"])
-        print(f'Loading config from file {configFile}')
+        logging.info(f'Loading config from file {configFile}')
         with open(configFile, 'rt') as f:
             t_args = argparse.Namespace()
             try:
-                configItems = json.load(f)
+                configItems.update(json.load(f))
                 # add config options that are not necessary to be specified in config file but need to be initialized
                 for k in ["save", "existing", "dryrun"]:
                     if k not in configItems.keys():
@@ -718,12 +727,24 @@ if __name__ == "__main__":
                 t_args.__dict__.update(configItems)
                 args = parser.parse_args(namespace=t_args)
             except BaseException as e:
-                print("Loading from config failed.", e)
+                logging.error("Loading from config failed.", e)
                 # if loading fails, prepare gooey interface
                 args = parse_arguments(configItems)
     else:
         # ask for config, prepare gooey interface
         args = parse_arguments(configItems)
+
+    # init logger before we start connection checks
+    if args.verbose:
+        level = logging.INFO
+    else:
+        level = logging.WARNING
+    azureLogger = logging.getLogger('azure')
+    azureLogger.setLevel(level)
+    # # Configure a console output
+    # handler = logging.StreamHandler(stream=sys.stdout)
+    # handler.setLevel(level)
+    # azureLogger.addHandler(handler)
 
     # check args including storage client and set up storageService
     storageService = checkArgs(args)
