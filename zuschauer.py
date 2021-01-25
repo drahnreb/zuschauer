@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 __author__ = "Bernhard Häußler"
 __copyright__   = "Copyright (c) 2020"
-__version__ = 0.2
+__version__ = 0.3
 __license__ = "BSD"
 __maintainer__ = "Bernhard Häußler"
 __email__ = "@drahnreb"
@@ -12,9 +12,13 @@ __status__ = "Production"
     Zuschauer (*der Zuschauer dt. - spectator*) - 
     Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future).
     Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
-"""
+    You need to install pip install pywin32.
+    After that you need to run python Scripts/pywin32_postinstall.py -install from your Python directory to register the dlls.
+    To hide the program, you can run it via pythonw.exe.
 
-from gooey import Gooey, GooeyParser
+"""
+if __package__ is None or __package__ == '':
+    from gooey import Gooey, GooeyParser
 import argparse
 from pathlib import Path
 import os
@@ -35,14 +39,14 @@ import json
 import keyring
 STORECREDENTIALS = False
 try:
-    if platform.system() == "Windows":
+    if platform.system().lower().startswith("win"):
         import pywin32
         STORECREDENTIALS = True
-    elif platform.system() == "Linux":
+    elif platform.system().lower().startswith("lin"):
         import secretstorage
         STORECREDENTIALS = True
     else:
-        STORECREDENTIALS = True
+        raise NotImplementedError
 except ImportError:
     print("Cannot use keyring features. Won't be able to store credentials")
 
@@ -57,7 +61,7 @@ STORAGES = ["ADLS", "Blob", "onPrem"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
 
-@Gooey
+@Gooey(program_name="zuschauer @drahnreb", default_size=(1200,910), taskbar=True)
 def parse_arguments(defaults):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
@@ -291,7 +295,6 @@ def _parse_arguments(defaults={}, gooey=False):
     except SystemExit as e:
         os._exit(e.code)
 
-
 def checkArgs(args):
     # check Namespace
     try:
@@ -378,7 +381,6 @@ def checkArgs(args):
         exit(1)
 
     return storageService
-
 
 def run_cli_command(cmd):
     # if os.name == 'nt':
@@ -759,8 +761,8 @@ if __name__ == "__main__":
             config['dryrun'] = False
             [config.pop(k, None) for k in ['save', 'load', 'existing', 'connectionString']]
             with open(CONFIGFILE, 'w') as outfile:
-                json.dump(config, outfile)
-        # run watchdog
+                json.dump(config, outfile, indent=2)
+        # run main
         main(args, storageService)
     else:
         print("Arguments are wrong. Config not saved. Nothing uploaded. \n\nExit.")
