@@ -51,3 +51,19 @@ python zuschauer.py -h
 
 ## Author
 Bernhard Häußler, TU Berlin
+
+## License
+zuschauer is licensed under the MIT license, as included in the [LICENSE](LICENSE) file.
+
+* Copyright (C) 2021 zuschauer contributors
+
+Please see the git history for authorship information.
+
+If not stated elsewise:
+Copyright (C) 2019-2021 Bernhard J. Häussler "drahnreb"
+
+gooey:
+Copyright (c) 2013-2017 Chris Kiehl
+
+azure sdk:
+Copyright (c) 2016 Microsoft
