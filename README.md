@@ -1,6 +1,7 @@
-# zuschauer
+# zuschauer [![Python 3.7](https://img.shields.io/badge/python-3.7-blue.svg)](https://www.python.org/downloads/release/python-370/) ![t](https://img.shields.io/badge/status-stable-green.svg) [![](https://img.shields.io/github/license/drahnreb/zuschauer.svg)](https://github.com/drahnreb/zuschauer/blob/master/LICENSE.md)
 IoT simplified - watchdog + azure storage blob
 (*Der Zuschauer dt. - spectator*)
+
 
 ![Zuschauer by Bernhard Häußler](/../media/screenshot.png?raw=true "Screenshot of Zuschauer")
 
