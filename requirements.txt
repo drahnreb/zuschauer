@@ -1,7 +1,9 @@
-python==3.7.9
-azure-storage-blob==12.6.0
+# python==3.7.9
+azure-identity==1.5.0
+azure-storage-file-datalake==12.2.2
+azure-storage-blob==12.7.1
 watchdog==1.0.2
-gooey==1.0.8
+# gooey==1.0.8
 arrow==0.17.0
 keyring==21.5.0
 pywin32
