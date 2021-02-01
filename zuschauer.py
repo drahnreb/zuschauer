@@ -3,7 +3,7 @@
 __author__ = "Bernhard Häußler"
 __copyright__   = "Copyright (c) 2020"
 __version__ = 0.3
-__license__ = "BSD"
+__license__ = "MIT"
 __maintainer__ = "Bernhard Häußler"
 __email__ = "@drahnreb"
 __status__ = "Production"
