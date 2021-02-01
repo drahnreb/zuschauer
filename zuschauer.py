@@ -40,15 +40,27 @@ import keyring
 STORECREDENTIALS = False
 try:
     if platform.system().lower().startswith("win"):
-        import pywin32
+        import win32com.client # pywin32
         STORECREDENTIALS = True
     elif platform.system().lower().startswith("lin"):
         import secretstorage
         STORECREDENTIALS = True
     else:
         raise NotImplementedError
-except ImportError:
-    print("Cannot use keyring features. Won't be able to store credentials")
+except ImportError as e:
+    if platform.system().lower().startswith("win"):
+        try:
+            from win32ctypes.pywin32 import win32cred
+            win32cred.__name__
+        except ImportError as e:
+            print(
+                """
+                    You need to install pip install pywin32 or pywin32-ctypes.
+                    After that you need to run python Scripts/pywin32_postinstall.py -install from your Python directory to register the dlls.
+                """
+            )
+    else:
+        print("Cannot use keyring features. Won't be able to store credentials", str(e))
 
 # uses official Azure SDK for python
 # https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
@@ -56,8 +68,10 @@ except ImportError:
 from azure.storage.blob._shared.base_client import create_configuration
 from azure.storage.blob.aio import BlobServiceClient as BlobServiceClientAIO
 from azure.storage.blob import BlobServiceClient
+from azure.identity import ClientSecretCredential
+from azure.storage.filedatalake import DataLakeServiceClient
 
-STORAGES = ["ADLS", "Blob", "onPrem"]
+STORAGES = ["ADLS", "Blob", "ADLS Gen2", "onPrem"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
 
@@ -102,12 +116,12 @@ def parse_arguments(defaults):
         }
     )
     requiredNamed.add_argument(
-        "-connectionString",
+        "-credentials",
         "-c",
         required=True,
-        help='"<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (for Azure Storage: ADLS Gen1/Blob Container - Path of Storage Ressource) or path to network share.',
+        help='"<AccountName==$$$;TenantID=$$$;ClientID=$$$;ClientSecret=$$$;Path=$$$)>" (Azure Storage Identity with e.g. Service Principal credentials) // "<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (connectionString w/o Service Principal) // Path of Storage Ressource or to network share.',
         gooey_options={
-            'initial_value': defaults.get('connectionString', "")  
+            'initial_value': defaults.get('credentials', "")  
         }
     )
     # optional
@@ -226,10 +240,10 @@ def _parse_arguments(defaults={}, gooey=False):
         help="Storage Option.",
     )
     requiredNamed.add_argument(
-        "-connectionString",
+        "-credentials",
         "-c",
         required=gooey,
-        help='"<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (for Azure Storage: ADLS Gen1/Blob Container - Path of Storage Ressource) or path to network share.',
+        help='"<AccountName==$$$;TenantID=$$$;ClientID=$$$;ClientSecret=$$$;Path=$$$)>" (Azure Storage Identity with e.g. Service Principal credentials) // "<AccountName=$$$;AccountKey=$$$;Path=$$$)>" (connectionString w/o Service Principal) // Path of Storage Ressource or to network share.',
     )
     # optional
     parser.add_argument(
@@ -298,7 +312,7 @@ def _parse_arguments(defaults={}, gooey=False):
 def checkArgs(args):
     # check Namespace
     try:
-        _ = [args.paths, args.filetypes, args.connectionString, args.storage, args.proxy,\
+        _ = [args.paths, args.filetypes, args.credentials, args.storage, args.proxy,\
             args.save, args.refresh, args.recursive, args.verbose, args.dryrun, args.existing]
     except AttributeError as e:
         print(f"Argument in config not set correctly: \n{e}")
@@ -323,23 +337,25 @@ def checkArgs(args):
         logging.error(f"{args.filetypes} not set correctly.")
         exit(1)
 
-    # check if connection string arg, if correct init storageService to be passed to watchdog
+    # get proxy settings
+    if len(args.proxy) and ';' in args.proxy:
+        http_proxy, https_proxy = args.proxy.split(';', 1)
+        proxy = dict(http_proxy=http_proxy, https_proxy=https_proxy)
+    else:
+        proxy = None
+
+    # check if credentials arg, if correct init storageService to be passed to watchdog
     out, err, pathToDestination, storageService = '', '', '', None
-    connString = args.connectionString
-    if all([s in connString for s in ["AccountName=","AccountKey=","Path=",";"]]):
-        split = connString.split(';', 2)
+    creds = args.credentials
+    if all([s in creds for s in ["AccountName=","AccountKey=","Path=",";"]]):
+        # connection String
+        split = creds.split(';', 2)
         if len(split) == 3:
-            # parse connection string
-            r = re.search("AccountName=(.*);AccountKey=(.*);Path=(.*)", connString)
+            # parse credentials
+            r = re.search("AccountName=(.*);AccountKey=(.*);Path=(.*)", creds)
             AccountName = r.group(1)
             AccountKey = r.group(2)
             pathToDestination = r.group(3)
-            # get proxy settings
-            if len(args.proxy) and ';' in args.proxy:
-                http_proxy, https_proxy = args.proxy.split(';', 1)
-                proxy = dict(http_proxy=http_proxy, https_proxy=https_proxy)
-            else:
-                proxy = None
 
             if pathToDestination:
                 if args.storage == STORAGES[0]:
@@ -359,11 +375,11 @@ def checkArgs(args):
                 elif args.storage == STORAGES[1]:
                     # BLOB
                     # init
-                    ac = AzureStorageContainer(connection_string=f"AccountName={AccountName};AccountKey={AccountKey}",
-                        container_name=pathToDestination, proxy=proxy)
+                    ac = AzureStorage(creds=f"AccountName={AccountName};AccountKey={AccountKey}", account_name=AccountName,
+                        container_name=pathToDestination, proxy=proxy, storage_type=args.storage)
                     # check connection
                     if not ac.connected:
-                        print("Cannot connect to Azure Blob Service.")
+                        print("Cannot connect to Azure Storage.")
                     else:
                         storageService = ac
                 # TODO: implement the rest of the storage options
@@ -374,6 +390,40 @@ def checkArgs(args):
         else:
             print("Check connection string. Format of connection string of Azure Dashboard not yet supported.")
             raise NotImplementedError
+
+    elif all([s in creds for s in ["AccountName=","TenantID=","ClientID=","ClientSecret=","Path=",";"]]):
+        # Service Principal with identity object
+        split = creds.split(';', 4)
+        if len(split) == 5:
+            # parse credentials
+            r = re.search("AccountName=(.*);TenantID=(.*);ClientID=(.*);ClientSecret=(.*);Path=(.*)", creds)
+            AccountName = r.group(1)
+            TenantID = r.group(2)
+            ClientID = r.group(3)
+            ClientSecret = r.group(4)
+            pathToDestination = r.group(5) # storage name
+
+            if pathToDestination:
+                if args.storage == STORAGES[1] or args.storage == STORAGES[2]:
+                    # BLOB / ADLS2
+                    csc = ClientSecretCredential(tenant_id=TenantID, client_id=ClientID, client_secret=ClientSecret)
+                    # init
+                    ac = AzureStorage(creds=csc, account_name=AccountName,
+                        container_name=pathToDestination, proxy=proxy, storage_type=args.storage)
+                    # check connection
+                    if not ac.connected:
+                        print("Cannot connect to Azure Storage.")
+                    else:
+                        storageService = ac
+                # TODO: implement the rest of the storage options
+                else:
+                    raise NotImplementedError
+            else:
+                print("Path in Credentials not set (correctly).")
+        else:
+            print("Check credentials.")
+            raise NotImplementedError
+
 
     if storageService is None:
         print("A connection to storage option could not be established.")
@@ -394,124 +444,86 @@ def run_cli_command(cmd):
     return result.returncode, result.stdout, result.stderr
 
 
-class AzureStorageContainer():
-    def __init__(self, connection_string: str, container_name: str, proxy: dict=None):
-        self.connection_string = connection_string        
-        # Create a storage Configuration object and update the proxy policy.
-        self.config = create_configuration(storage_sdk='blob')
-
-        if proxy is not None:
-            http_proxy = proxy.get('http_proxy')
-            https_proxy = proxy.get('https_proxy')
-            if http_proxy is not None and https_proxy is not None:
-                self.config.proxy_policy.proxies = {
-                    'http': http_proxy,
-                    'https': https_proxy
-                }
+class AzureStorage():
+    def __init__(self, creds: str, account_name: str, container_name: str, storage_type: str, proxy: dict=None):
+        self.creds = creds
+        self.account_name = account_name
         self.container_name = container_name
+        self.storage_type = storage_type
+        self.proxy = proxy
+
+        # Instantiate service client
+        if isinstance(self.creds, ClientSecretCredential):
+            if self.storage_type == STORAGES[2]:
+                self.service_client = DataLakeServiceClient(
+                    account_url=f"https://{self.account_name}.dfs.core.windows.net", credential=self.creds)
+            else:
+                self.service_client = BlobServiceClient(
+                    account_url=f"https://{self.account_name}.blob.core.windows.net", credential=self.creds)
+        else:
+            if self.storage_type == STORAGES[2]:
+                self.service_client = DataLakeServiceClient.from_connection_string(self.creds)
+            else:
+                # using a connection string
+                self.service_client = BlobServiceClient.from_connection_string(self.creds)
+
+        if self.proxy is not None:
+            http_proxy = self.proxy.get('http_proxy')
+            https_proxy = self.proxy.get('https_proxy')
+            if http_proxy is not None and https_proxy is not None:
+                self.service_client.config.proxies.add('https', https_proxy)
+                # self.service_client.config.proxies.add('http', http_proxy)
+
+    def _get_obj_client(self, fname):
+        if self.storage_type == STORAGES[2]:
+            # derive a new file client
+            obj_client = self.service_client.get_file_client(file_system=self.container_name, file_path=fname)
+        else:
+            # derive a new blob client
+            obj_client = self.service_client.get_blob_client(container=self.container_name, blob=fname)
+        return obj_client
+
+    def upload(self, path: Path, overwrite: bool=False, asynced: bool=False):
+        failed = True
+        path = path.resolve()
+        if path.exists() and path.is_file():
+            with self.service_client:
+                try:
+                    # Instantiate a new BlobClient
+                    obj_client = self._get_obj_client(path.name)
+                    # Upload content to block blob
+                    with open(path, "rb") as data:
+                        if self.storage_type == STORAGES[2]:
+                            obj_client.upload_data(data, length=None, overwrite=overwrite, logging_enable=True)
+                        else:
+                            obj_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
+                        failed = False
+                finally:
+                    pass
+            return failed
+        else:
+            print(f"{path} does not exist or not a file.")
+            logging.error(f"{path} does not exist or not a file.")
+        return failed
 
     def _available_containers(self):
         success = False
         containers = []
         try:
-            bsc = self._bsc()
-            with bsc:
-                containers = list(bsc.list_containers(logging_enable=True))
+            with self.service_client:
+                if self.storage_type == STORAGES[2]:
+                    containers = list(self.service_client.list_file_systems(logging_enable=True))
+                else:
+                    containers = list(self.service_client.list_containers(logging_enable=True))
             success = True
         except BaseException as e:
             print(e)
             pass
         return success, containers
 
-    def _init_blob_service(self, blob_name):
-        # Instantiate a new ContainerClient
-        container_client = self.bsc.get_container_client(self.container_name)
-        # Instantiate a new BlobClient
-        blob_client = container_client.get_blob_client(blob_name)
-
-        return blob_client
-
-    def _bsc(self, asynced=False):
-        if asynced:
-            # Instantiate a new BlobServiceClientAIO using a connection string
-            return BlobServiceClientAIO.from_connection_string(self.connection_string, _configuration=self.config)
-        else:
-            # Construct the BlobServiceClient, including the customized configuation.
-            return BlobServiceClient.from_connection_string(self.connection_string, _configuration=self.config)
-
-    async def _save_block_async(self, path, overwrite=False):
-        async with self.bsc:
-            try:
-                # Instantiate a new BlobClient
-                blob_client = self._init_blob_service(path.name)
-
-                # [START upload_a_blob]
-                # Upload content to block blob
-                with open(path, "rb") as data:
-                    await blob_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
-                # [END upload_a_blob]
-            finally:
-                pass
-                
-            return
-
-    def _save_block(self, path, overwrite=False):
-        with self.bsc:
-            try:
-                # Instantiate a new BlobClient
-                blob_client = self._init_blob_service(path.name)
-
-                # [START upload_a_blob]
-                # Upload content to block blob
-                with open(path, "rb") as data:
-                    blob_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
-                # [END upload_a_blob]
-            finally:
-                pass
-
-        return
-
-    def save_block_blob(self, path: Path, asynced: bool=False, overwrite: bool=False):
-        failed = True
-        path = path.resolve()
-        if path.exists() and path.is_file():
-            self.bsc = self._bsc(asynced=asynced)
-            if asynced:
-                self._save_block_async(path, overwrite)
-            else:
-                self._save_block(path, overwrite)
-            failed = False
-            self.bsc = None
-        else:
-            print(f"{path} does not exist or not a file.")
-            logging.error(f"{path} does not exist or not a file.")
-
-        return failed
-
     @property
     def connected(self):
         return self._available_containers()[0]
-
-    def download(self, blob_name, path):
-            # Instantiate a new BlobClient
-            blob_client = self._init_blob_service(blob_name)
-
-            if path.is_directory():
-                path = path.joinpath(blob_name)
-            # [START download_a_blob]
-            with open(path, "wb") as down:
-                download_stream = blob_client.download_blob()
-                down.write(download_stream.readall())
-            # [END download_a_blob]
-
-    def delete_blob(self, blob_name):
-            # Instantiate a new BlobClient
-            blob_client = self._init_blob_service(blob_name)
-
-            # [START delete_blob]
-            blob_client.delete_blob()
-            # [END delete_blob]
-
 
 class Zuschauer(FileSystemEventHandler):
     # files to exclude from being watched
@@ -574,7 +586,7 @@ class Zuschauer(FileSystemEventHandler):
             raise NotImplementedError
         else:
             # Blob
-            failed = self.storageService.save_block_blob(path=changedFile, overwrite=overwrite)
+            failed = self.storageService.upload(path=changedFile, overwrite=overwrite)
 
         print(f"$$ Successfully {'copied' if not overwrite else 'overwritten'}: {str(changedFile.name)} {'to' if not overwrite else 'in'} {self.storage}" if not(failed) else f"## Failed copying: {str(changedFile.name)}")
         logging.info(f"$$ Successfully {'copied' if not overwrite else 'overwritten'}: {str(changedFile.name)} {'to' if not overwrite else 'in'} {self.storage}" if not(failed) else f"## Failed copying: {str(changedFile.name)}")
@@ -702,17 +714,17 @@ if __name__ == "__main__":
     configFile = _args.load
 
     configItems = {}
-    # connectionString provided by arg?
-    connString = _args.connectionString
-    if connString is None and STORECREDENTIALS:
-        # connectionString saved in keyring?
-        connString = keyring.get_password("zuschauer@drahnreb", f"zs_connectionString_{platform.node()}")
-        if connString:
-            logging.info("retrieved connection string")
-    configItems["connectionString"] = connString
+    # creds provided by arg?
+    creds = _args.creds
+    if creds is None and STORECREDENTIALS:
+        # creds saved in keyring?
+        creds = keyring.get_password("zuschauer@drahnreb", f"zs_creds_{platform.node()}")
+        if creds:
+            logging.info("retrieved creds")
+    configItems["creds"] = creds
 
-    # config file available and connection string was retrieved (keyring or arg)
-    if configFile.exists() and configFile.is_file() and configItems["connectionString"] is not None:
+    # config file available and creds were retrieved (keyring or arg)
+    if configFile.exists() and configFile.is_file() and configItems["creds"] is not None:
         logging.info(f'Loading config from file {configFile}')
         with open(configFile, 'rt') as f:
             t_args = argparse.Namespace()
@@ -755,11 +767,11 @@ if __name__ == "__main__":
         # persist config for restart
         if args.save:
             if STORECREDENTIALS:
-                keyring.set_password("zuschauer@drahnreb", f"zs_connectionString_{platform.node()}", str(args.connectionString))
+                keyring.set_password("zuschauer@drahnreb", f"zs_creds_{platform.node()}", str(args.creds))
             config = vars(args).copy()
             config['paths'] = [str(p) for p in args.paths]
             config['dryrun'] = False
-            [config.pop(k, None) for k in ['save', 'load', 'existing', 'connectionString']]
+            [config.pop(k, None) for k in ['save', 'load', 'existing', 'creds']]
             with open(CONFIGFILE, 'w') as outfile:
                 json.dump(config, outfile, indent=2)
         # run main
