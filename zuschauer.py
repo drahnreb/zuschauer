@@ -487,10 +487,9 @@ class AzureStorage():
         failed = True
         path = path.resolve()
         if path.exists() and path.is_file():
-            with self.service_client:
-                try:
-                    # Instantiate a new BlobClient
-                    obj_client = self._get_obj_client(path.name)
+            try:
+                # Instantiate a new BlobClient
+                with self._get_obj_client(path.name) as obj_client:
                     # Upload content to block blob
                     with open(path, "rb") as data:
                         if self.storage_type == STORAGES[2]:
@@ -498,8 +497,8 @@ class AzureStorage():
                         else:
                             obj_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
                         failed = False
-                finally:
-                    pass
+            finally:
+                pass
             return failed
         else:
             print(f"{path} does not exist or not a file.")
@@ -510,11 +509,10 @@ class AzureStorage():
         success = False
         containers = []
         try:
-            with self.service_client:
-                if self.storage_type == STORAGES[2]:
-                    containers = list(self.service_client.list_file_systems(logging_enable=True))
-                else:
-                    containers = list(self.service_client.list_containers(logging_enable=True))
+            if self.storage_type == STORAGES[2]:
+                containers = list(self.service_client.list_file_systems(logging_enable=True))
+            else:
+                containers = list(self.service_client.list_containers(logging_enable=True))
             success = True
         except BaseException as e:
             print(e)
@@ -715,7 +713,7 @@ if __name__ == "__main__":
 
     configItems = {}
     # creds provided by arg?
-    creds = _args.creds
+    creds = _args.credentials
     if creds is None and STORECREDENTIALS:
         # creds saved in keyring?
         creds = keyring.get_password("zuschauer@drahnreb", f"zs_creds_{platform.node()}")
