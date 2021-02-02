@@ -765,7 +765,7 @@ if __name__ == "__main__":
         # persist config for restart
         if args.save:
             if STORECREDENTIALS:
-                keyring.set_password("zuschauer@drahnreb", f"zs_creds_{platform.node()}", str(args.creds))
+                keyring.set_password("zuschauer@drahnreb", f"zs_creds_{platform.node()}", str(args.credentials))
             config = vars(args).copy()
             config['paths'] = [str(p) for p in args.paths]
             config['dryrun'] = False
