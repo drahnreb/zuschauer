@@ -579,7 +579,7 @@ class Zuschauer(FileSystemEventHandler):
                 failed, _, _ = run_cli_command(cmd)
             else:
                 failed = True
-        elif self.storage == STORAGES[2]:
+        elif self.storage == STORAGES[3]:
             # TODO: onPrem
             raise NotImplementedError
         else:
