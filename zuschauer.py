@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 __author__ = "Bernhard Häußler"
 __copyright__   = "Copyright (c) 2020"
-__version__ = 0.3
+__version__ = 0.4
 __license__ = "MIT"
 __maintainer__ = "Bernhard Häußler"
 __email__ = "@drahnreb"
@@ -70,12 +70,13 @@ from azure.storage.blob.aio import BlobServiceClient as BlobServiceClientAIO
 from azure.storage.blob import BlobServiceClient
 from azure.identity import ClientSecretCredential
 from azure.storage.filedatalake import DataLakeServiceClient
+from azure.core.pipeline.policies import ProxyPolicy
 
 STORAGES = ["ADLS", "Blob", "ADLS Gen2", "onPrem"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
 
-@Gooey(program_name="zuschauer @drahnreb", default_size=(1200,910), taskbar=True)
+@Gooey(program_name="zuschauer @drahnreb", default_size=(800,500), taskbar=True)
 def parse_arguments(defaults):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
@@ -132,6 +133,16 @@ def parse_arguments(defaults):
         help="Semicolon separated Proxy URLs or IP Adresses for http;http(s) if proxy doesn't support https use http:// prefix twice\nformat: 'http://proxyURLorIP:proxyPort;http(s)://proxyURLorIP:proxyPort'",
         gooey_options={
             'initial_value': defaults.get('proxy', "")  
+        }
+    )
+    parser.add_argument(
+        "--ssl_verify",
+        "-y",
+        action='store_true',
+        default=False,
+        help="En-/Disable SSL Certificate Verification.",
+        gooey_options={
+            'initial_value': defaults.get('ssl_verify', False)  
         }
     )
     parser.add_argument(
@@ -251,6 +262,12 @@ def _parse_arguments(defaults={}, gooey=False):
         "-y",
         default='' if gooey else None,
         help="Semicolon separated Proxy URLs or IP Adresses for http;http(s) if proxy doesn't support https use http:// prefix twice\nformat: 'http://proxyURLorIP:proxyPort;http(s)://proxyURLorIP:proxyPort'",
+    )
+    parser.add_argument(
+        "--ssl_verify",
+        "-y",
+        default=False if gooey else None,
+        help="En-/Disable SSL Certificate Verification.",
     )
     parser.add_argument(
         "--save",
@@ -375,8 +392,11 @@ def checkArgs(args):
                 elif args.storage == STORAGES[1]:
                     # BLOB
                     # init
-                    ac = AzureStorage(creds=f"AccountName={AccountName};AccountKey={AccountKey}", account_name=AccountName,
-                        container_name=pathToDestination, proxy=proxy, storage_type=args.storage)
+                    ac = AzureStorage(creds=f"AccountName={AccountName};AccountKey={AccountKey}",
+                        account_name=AccountName, container_name=pathToDestination, proxy=proxy,
+                        storage_type=args.storage,
+                        ssl_verify=args.ssl_verify
+                    )
                     # check connection
                     if not ac.connected:
                         print("Cannot connect to Azure Storage.")
@@ -406,10 +426,17 @@ def checkArgs(args):
             if pathToDestination:
                 if args.storage == STORAGES[1] or args.storage == STORAGES[2]:
                     # BLOB / ADLS2
-                    csc = ClientSecretCredential(tenant_id=TenantID, client_id=ClientID, client_secret=ClientSecret)
+                    csc = ClientSecretCredential(
+                        tenant_id=TenantID,
+                        client_id=ClientID,
+                        client_secret=ClientSecret,
+                        connection_verify=False
+                    )
                     # init
                     ac = AzureStorage(creds=csc, account_name=AccountName,
-                        container_name=pathToDestination, proxy=proxy, storage_type=args.storage)
+                        container_name=pathToDestination, proxy=proxy, storage_type=args.storage,
+                        ssl_verify=args.ssl_verify
+                    )
                     # check connection
                     if not ac.connected:
                         print("Cannot connect to Azure Storage.")
@@ -445,34 +472,62 @@ def run_cli_command(cmd):
 
 
 class AzureStorage():
-    def __init__(self, creds: str, account_name: str, container_name: str, storage_type: str, proxy: dict=None):
+    def __init__(self,
+                creds: str,
+                account_name: str,
+                container_name: str,
+                storage_type: str,
+                proxy: dict=None,
+                ssl_verify: bool=False):
         self.creds = creds
         self.account_name = account_name
         self.container_name = container_name
         self.storage_type = storage_type
         self.proxy = proxy
+        self.ssl_verify = ssl_verify
 
         # Instantiate service client
         if isinstance(self.creds, ClientSecretCredential):
             if self.storage_type == STORAGES[2]:
                 self.service_client = DataLakeServiceClient(
-                    account_url=f"https://{self.account_name}.dfs.core.windows.net", credential=self.creds)
+                    account_url=f"https://{self.account_name}.dfs.core.windows.net",
+                    credential=self.creds,
+                    connection_verify=self.ssl_verify
+                )
             else:
                 self.service_client = BlobServiceClient(
-                    account_url=f"https://{self.account_name}.blob.core.windows.net", credential=self.creds)
-        else:
-            if self.storage_type == STORAGES[2]:
-                self.service_client = DataLakeServiceClient.from_connection_string(self.creds)
-            else:
-                # using a connection string
-                self.service_client = BlobServiceClient.from_connection_string(self.creds)
+                    account_url=f"https://{self.account_name}.blob.core.windows.net",
+                    credential=self.creds,
+                    connection_verify=self.ssl_verify
+                )
+            
+            if self.proxy is not None:
+                if self.proxy.get('https_proxy') is not None:
+                    self.service_client._config.proxy_policy = ProxyPolicy(proxies=proxy)
 
-        if self.proxy is not None:
+        else:
+            config = create_configuration(storage_sdk='blob') # blob
             http_proxy = self.proxy.get('http_proxy')
             https_proxy = self.proxy.get('https_proxy')
             if http_proxy is not None and https_proxy is not None:
-                self.service_client.config.proxies.add('https', https_proxy)
-                # self.service_client.config.proxies.add('http', http_proxy)
+                config.proxy_policy.proxies = {
+                    'http': http_proxy,
+                    'https': https_proxy
+                }
+
+            if self.storage_type == STORAGES[2]:
+                self.service_client = DataLakeServiceClient.from_connection_string(
+                    self.creds,
+                    _configuration=config,
+                    connection_verify=self.ssl_verify
+                )
+            else:
+                # using a connection string
+                self.service_client = BlobServiceClient.from_connection_string(
+                    self.creds,
+                    _configuration=config,
+                    connection_verify=self.ssl_verify
+                )
 
     def _get_obj_client(self, fname):
         if self.storage_type == STORAGES[2]:
@@ -757,6 +812,10 @@ if __name__ == "__main__":
     # handler = logging.StreamHandler(stream=sys.stdout)
     # handler.setLevel(level)
     # azureLogger.addHandler(handler)
+
+    if not args.ssl_verify:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
     # check args including storage client and set up storageService
     storageService = checkArgs(args)
