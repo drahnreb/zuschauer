@@ -1,0 +1,3 @@
+[submodule "Gooey"]
+	path = Gooey
+	url = git@github.com:drahnreb/Gooey.git
