@@ -1,12 +1,13 @@
 # zuschauer [![Python 3.7](https://img.shields.io/badge/python-3.7-blue.svg)](https://www.python.org/downloads/release/python-370/) ![t](https://img.shields.io/badge/status-stable-green.svg) [![](https://img.shields.io/github/license/drahnreb/zuschauer.svg)](https://github.com/drahnreb/zuschauer/blob/master/LICENSE.md)
-IoT simplified - watchdog + azure storage blob
+IoT simplified - watchdog + azure storage options
+
 (*Der Zuschauer dt. - spectator*)
 
 
 ![Zuschauer by Bernhard Häußler](/../media/screenshot.png?raw=true "Screenshot of Zuschauer")
 
 ## Details
-Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future). Azure functionality is implemented by leveraging [Azure Blob Storage Python SDK](https://github.com/Azure/azure-sdk-for-python).
+Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 2` or on-premise network drives. Azure functionality is implemented by leveraging [Azure Blob Storage Python SDK](https://github.com/Azure/azure-sdk-for-python).
 The AzureBlobFileSystem accepts [all of the Async BlobServiceClient arguments](https://docs.microsoft.com/en-us/azure/storage/blobs/storage-quickstart-blobs-python).
 Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
 By default, write operations create BlockBlobs in Azure, which, once written can not be appended.
