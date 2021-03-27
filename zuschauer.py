@@ -10,13 +10,19 @@ __status__ = "Production"
 
 """
     Zuschauer (*der Zuschauer dt. - spectator*) - 
-    Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option. Supported options are `Azure Storage Blob`, `ADLS Gen 1` (untested) or on-premise Network Drives (in future).
+    Watch a (or more) specified folder(s) for newly created or modified files and **copy** them to configured storage option.
+    Supported options are `Azure Storage Blob`, `ADLS Gen 2`, on-premise Network Drives or MQTT Topics.
     Zuschauer uses official APIs and opens files in read-only byte mode to copy files, it waits a second to prevent data loss.
     You need to install pip install pywin32.
     After that you need to run python Scripts/pywin32_postinstall.py -install from your Python directory to register the dlls.
     To hide the program, you can run it via pythonw.exe.
 
 """
+
+# only when in "azure mode", zuschauer is using official Azure SDK for python
+# https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
+# https://github.com/Azure/azure-sdk-for-python/tree/master/sdk/storage/azure-storage-blob
+
 if __package__ is None or __package__ == '':
     from Gooey.gooey import Gooey, GooeyParser
 import argparse
@@ -63,16 +69,8 @@ except ImportError as e:
     else:
         print("Cannot use keyring features. Won't be able to store credentials", str(e))
 
-# uses official Azure SDK for python
-# https://github.com/Azure/azure-sdk-for-python/blob/master/sdk/eventhub/azure-eventhub-checkpointstoreblob-aio/azure/eventhub/extensions/checkpointstoreblobaio/_vendor/storage/blob/_blob_client.py
-# https://github.com/Azure/azure-sdk-for-python/tree/master/sdk/storage/azure-storage-blob
-from azure.storage.blob._shared.base_client import create_configuration
-from azure.storage.blob import BlobServiceClient
-from azure.identity import ClientSecretCredential
-from azure.storage.filedatalake import DataLakeServiceClient
-from azure.core.pipeline.policies import ProxyPolicy
-
-STORAGES = ["Blob", "ADLS Gen2", "onPrem"]
+MQTTBUFSIZE = 2000
+STORAGES = ["Blob", "ADLS Gen2", "onPrem", "MQTT"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
 
@@ -120,7 +118,7 @@ def parse_arguments(defaults):
         "-destination",
         "-d",
         required=True,
-        help='Destination. if onPrem: Network Share Path if Azure Storage Blob: Container Name if Azure Storage ADLS Gen2: Filesystem',
+        help='Destination. CHECK CAREFULLY!   if MQTT: Topic (no spaces;only ASCII is enforced!) // if onPrem: Network Share Path // if Azure Storage Blob: Container Name if Azure Storage ADLS Gen2: Filesystem',
         gooey_options={
             'initial_value': defaults.get('destination', "")  
         }
@@ -130,7 +128,7 @@ def parse_arguments(defaults):
         "--account_name",
         "-n",
         default='',
-        help='Azure Storage Identity: AccountName (from portal.azure.com)',
+        help='Azure Storage Identity: AccountName (from portal.azure.com) // MQTT: Broker Hostname/IP',
         gooey_options={
             'initial_value': defaults.get('account_name', "")  
         }
@@ -139,7 +137,7 @@ def parse_arguments(defaults):
         "--account_key",
         "-k",
         default='',
-        help='Azure Storage Identity: Account Key (aka TenantID when Service Principal credentials)',
+        help='Azure Storage Identity: Account Key (aka TenantID when Service Principal credentials) // MQTT: Broker Port',
         gooey_options={
             'initial_value': defaults.get('account_key', "")  
         }
@@ -244,6 +242,15 @@ def parse_arguments(defaults):
         }
     )
     parser.add_argument(
+        "--pipeline",
+        action='store_true',
+        default=True,
+        help="Wait delay to prevent azure data factory pipeline concurrency failure.",
+        gooey_options={
+            'initial_value': defaults.get('pipeline', True)  
+        }
+    )
+    parser.add_argument(
         "--reset",
         action='store_true',
         default=False,
@@ -292,20 +299,20 @@ def _parse_arguments(defaults={}, gooey=False):
         "-destination",
         "-d",
         required=gooey,
-        help='Destination. if onPrem: Path to Network Share / if Azure Storage Blob: Container Name / if Azure Storage ADLS Gen2: Filesystem',
+        help='Destination. CHECK CAREFULLY!   if MQTT: Topic (no spaces;only ASCII is enforced!) // if onPrem: Network Share Path // if Azure Storage Blob: Container Name if Azure Storage ADLS Gen2: Filesystem',
     )
     # optional
     parser.add_argument(
         "--account_name",
         "-n",
         default='' if gooey else None,
-        help='Azure Storage Identity: AccountName (from portal.azure.com)',
+        help='Azure Storage Identity: AccountName (from portal.azure.com) // MQTT: Broker Hostname/IP',
     )
     parser.add_argument(
         "--account_key",
         "-k",
         default='' if gooey else None,
-        help='Azure Storage Identity: Account Key (aka TenantID when Service Principal credentials)',
+        help='Azure Storage Identity: Account Key (aka TenantID when Service Principal credentials) // MQTT: Broker Port',
     )
     parser.add_argument(
         "--client_id",
@@ -374,6 +381,12 @@ def _parse_arguments(defaults={}, gooey=False):
         help="Upload existing files in specified paths.",
     )
     parser.add_argument(
+        "--pipeline",
+        action='store_true',
+        default=True if gooey else None,
+        help="Wait delay to prevent azure data factory pipeline concurrency failure.",
+    )
+    parser.add_argument(
         "--reset",
         action='store_true',
         default=False if gooey else None,
@@ -399,7 +412,7 @@ def checkArgs(args):
         print(f"Argument in config not set correctly: \n{e}")
         loggin.error(f"Argument in config not set correctly: \n{e}")
         exit(1)
-        
+
     # check rest of required args
     if not len(args.paths) or not isinstance(args.paths, list):
         print(f"Zuschauer paths `{args.paths}` not set correctly.")
@@ -413,6 +426,10 @@ def checkArgs(args):
                 print(f"{p} is not a valid path on this system. Provide an absolute path.")
                 logging.ERROR(f"{p} is not a valid path on this system. Provide an absolute path.")
                 exit(1)
+
+    # Destination
+    assert len(destination), (
+        "No Destination Path or Topic set.")
 
     if not len(args.filetypes):
         print(f"{args.filetypes} not set correctly.")
@@ -456,11 +473,18 @@ class StorageService():
         self.ssl_verify = ssl_verify
         self.proxy = proxy
 
-        # Path handling
-        assert len(destination), (
-            "No Destination Path set.")
         if self.storage_type == "onPrem":
             self.destination = Path(destination).resolve()
+        elif self.storage_type == "MQTT":
+            # remove reserved $ topic and do not create an unnecessary
+            # topic level with a zero character at the front
+            destination = destination.replace('$', '').startswith('/', '')
+            # remove non ascii compatible and strip whitespaces
+            clean_destination = str(destination).strip().replace(' ', '').encode("ascii", "ignore").decode()
+            if destination != clean_destination:
+                print(f"IMPORTANT! Specified destination contained whitespaces or non ascii compatible characters,\
+                        changed Topic to {clean_destination}")
+            self.destination = clean_destination
         else:
             # cloud destination. take as is. do not resolve no path obj
             self.destination = destination
@@ -470,6 +494,28 @@ class StorageService():
         # init storage service client
         if self.storage_type == "onPrem":
             self.service_client = self.destination
+        elif self.storage_type == "MQTT":
+            # service connection
+            assert all([self.account_name, self.account_key]), (
+                "For MQTT Service, at least Account Name (HOST) and Account Key (PORT) must be specified.")
+            self.service_client = mqtt.Client()
+            def __on_publish(client, userdata, mid):
+                client.mid_value = mid
+                client.puback_flag = True
+            self.service_client.on_publish = __on_publish
+            self.service_client.puback_flag = False  # use flag in publish ack
+            self.service_client.mid_value = None
+            try:
+                # connect to broker
+                self.service_client.connect(
+                    host=self.account_name,
+                    port=self.account_key,
+                    60
+                )
+                # non-blocking threaded interface to the network loop
+                self.service_client.loop_start()
+            except ConnectionRefusedError:
+                self.service_client = None
         else:
             # cloud service
             assert all([self.account_name, self.account_key]), (
@@ -481,46 +527,45 @@ class StorageService():
             else:
                 self.service_principal = False
 
-            if self.storage_type in ["Blob", "ADLS Gen2"]:
-                # Instantiate service client
-                if self.service_principal:
-                    print("Provided ClientID and ClientSecret. Using Service Principal authentificaion method...")
-                    self.creds = ClientSecretCredential(
-                        tenant_id=self.account_key,
-                        client_id=self.client_id,
-                        client_secret=self.client_secret,
+            # Instantiate service client
+            if self.service_principal:
+                print("Provided ClientID and ClientSecret. Using Service Principal authentificaion method...")
+                self.creds = ClientSecretCredential(
+                    tenant_id=self.account_key,
+                    client_id=self.client_id,
+                    client_secret=self.client_secret,
+                    connection_verify=self.ssl_verify
+                )
+                if self.storage_type == "ADLS Gen2":
+                    self.service_client = DataLakeServiceClient(
+                        account_url=f"https://{self.account_name}.dfs.core.windows.net",
+                        credential=self.creds,
                         connection_verify=self.ssl_verify
                     )
-                    if self.storage_type == "ADLS Gen2":
-                        self.service_client = DataLakeServiceClient(
-                            account_url=f"https://{self.account_name}.dfs.core.windows.net",
-                            credential=self.creds,
-                            connection_verify=self.ssl_verify
-                        )
-                    else:
-                        # blob
-                        self.service_client = BlobServiceClient(
-                            account_url=f"https://{self.account_name}.blob.core.windows.net",
-                            credential=self.creds,
-                            connection_verify=self.ssl_verify
-                        )
                 else:
-                    # using a connection string
-                    self.connString = f"AccountName={self.account_name};AccountKey={self.account_key}"
-                    self.config = create_configuration(storage_sdk='blob') # blob
-                    if self.storage_type == "ADLS Gen2":
-                        self.service_client = DataLakeServiceClient.from_connection_string(
-                            self.connString,
-                            _configuration=self.config,
-                            connection_verify=self.ssl_verify
-                        )
-                    else:
-                        # blob
-                        self.service_client = BlobServiceClient.from_connection_string(
-                            self.connString,
-                            _configuration=self.config,
-                            connection_verify=self.ssl_verify
-                        )
+                    # blob
+                    self.service_client = BlobServiceClient(
+                        account_url=f"https://{self.account_name}.blob.core.windows.net",
+                        credential=self.creds,
+                        connection_verify=self.ssl_verify
+                    )
+            else:
+                # using a connection string
+                self.connString = f"AccountName={self.account_name};AccountKey={self.account_key}"
+                self.config = create_configuration(storage_sdk='blob') # blob
+                if self.storage_type == "ADLS Gen2":
+                    self.service_client = DataLakeServiceClient.from_connection_string(
+                        self.connString,
+                        _configuration=self.config,
+                        connection_verify=self.ssl_verify
+                    )
+                else:
+                    # blob
+                    self.service_client = BlobServiceClient.from_connection_string(
+                        self.connString,
+                        _configuration=self.config,
+                        connection_verify=self.ssl_verify
+                    )
 
                 # set proxy policy
                 if self.proxy is not None and self.proxy.get('https_proxy') is not None:
@@ -530,8 +575,8 @@ class StorageService():
                         self.config.proxy_policy.proxies = self.proxy
 
         if self.service_client is None or not self.connected:
-            print("A connection to storage option could not be established.")
-            logging.error("A connection to storage option could not be established.")
+            print(f"A connection to {'mqtt broker' if self.storage_type == 'MQTT' else 'storage option'} could not be established.")
+            logging.error("A connection could not be established.")
             exit(1)
 
     def _get_obj_client(self, fname):
@@ -571,7 +616,33 @@ class StorageService():
                         shutil.copy2(str(input_path), str(self.destination))
                         failed = False
                 else:
-                    failed = True
+                    # hashes
+                    out_hash = hashlib.sha256()
+                    def build_payload(counter, input_path, chunk=None, out_hash=None):
+                        payload = str(counter) + input_path + ","
+                        if out_hash is not None:
+                            payload += out_hash.hexdigest()
+                        payload = bytearray(payload, "utf-8")
+                        if chunk is not None:
+                            payload += chunk
+                        return payload
+
+                    with open(input_path, "rb") as f:
+                        n = 0
+                        for chunk in f.read(MQTTBUFSIZE):
+                            out_hash.update(chunk)
+                            self.service_client.publish(
+                                topic=self.destination,
+                                payload=build_payload(n, input_path, chunk),
+                                qos = 1
+                            )
+                            n += 1
+                        else:
+                            self.service_client.publish(
+                                topic=self.destination,
+                                payload=construct_end('end', input_path, out_hash),
+                                qos = 1
+                            )
             finally:
                 pass
             return failed
@@ -588,6 +659,11 @@ class StorageService():
                 containers = list(self.service_client.list_file_systems(logging_enable=True))
             elif self.storage_type == "Blob":
                 containers = list(self.service_client.list_containers(logging_enable=True))
+            elif self.storage_type == "MQTT":
+                failed, _ = self.service_client.publish(
+                    self.destination, out_message,qos)
+                if failed:
+                    raise ConnectionError
             else:
                 # check write permission and folders
                 if os.access(self.destination, os.W_OK):
@@ -744,7 +820,7 @@ def main(args, storageService):
                     existing_files[path] = foundExistingFiles
         if len(existing_files):
             if args.verbose or args.dryrun:
-                print(f"Uploading a total of {len(existing_files)} existing files.")
+                print(f"Dryrun: Could have uploaded a total of {len(existing_files)} existing files.")
             if not args.dryrun:
                 logging.info(f"Uploading a total of {len(existing_files)} existing files.")
                 for existingFiles in existing_files.values():
@@ -752,6 +828,8 @@ def main(args, storageService):
                         if file_.is_file():
                             # upload with non-overwriting flag set to boost upload
                             zs.execAction(file_, overwrite=False)
+                            if args.pipeline:
+                                time.sleep(20)
         else:
             print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
     try:
@@ -795,7 +873,7 @@ if __name__ == "__main__":
     configItems = {}
     creds_available = False
     # check for credentials
-    if _args.storage_type == "onPrem":
+    if _args.storage_type == "onPrem" or _args.storage_type == "MQTT":
         # not required, assume file share is already mounted by system
         creds_available = True
     else:
@@ -840,7 +918,7 @@ if __name__ == "__main__":
             t_args = argparse.Namespace()
             try:
                 # add config options that are not necessary to be specified in config file but need to be initialized
-                for k in ["save", "existing", "dryrun", "reset"]:
+                for k in ["save", "existing", "pipeline", "dryrun", "reset"]:
                     if k not in configItems.keys():
                         configItems[k] = False
                 # consume current flags
@@ -865,16 +943,32 @@ if __name__ == "__main__":
         level = logging.INFO
     else:
         level = logging.WARNING
-    azureLogger = logging.getLogger('azure')
-    azureLogger.setLevel(level)
-    # # Configure a console output
-    # handler = logging.StreamHandler(stream=sys.stdout)
-    # handler.setLevel(level)
-    # azureLogger.addHandler(handler)
 
-    if not args.ssl_verify:
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    # import necessary packages
+    if args.storage_type == "MQTT":
+        import hashlib  # chunked messages
+        import paho.mqtt.client as mqtt
+        logger = logging.getLogger('mqtt')
+        logger.setLevel(level)
+
+    elif args.storage_type != "onPrem":
+        # azure based
+        from azure.storage.blob._shared.base_client import create_configuration
+        from azure.storage.blob import BlobServiceClient
+        from azure.identity import ClientSecretCredential
+        from azure.storage.filedatalake import DataLakeServiceClient
+        from azure.core.pipeline.policies import ProxyPolicy
+
+        azureLogger = logging.getLogger('azure')
+        azureLogger.setLevel(level)
+        # # Configure a console output
+        # handler = logging.StreamHandler(stream=sys.stdout)
+        # handler.setLevel(level)
+        # azureLogger.addHandler(handler)
+
+        if not args.ssl_verify:
+            import requests
+            requests.packages.urllib3.disable_warnings(requests.packages.urllib3.exceptions.InsecureRequestWarning)
 
     # check args including storage client and set up storageService
     storageService = checkArgs(args)
@@ -896,3 +990,9 @@ if __name__ == "__main__":
             json.dump(config, outfile, indent=2)
     # run main
     main(args, storageService)
+
+    # TODO:
+    # shutdown routine / intercept KeyBoardInterrupt
+    # disconnect MQTT...
+    # client.disconnect() #disconnect
+    # client.loop_stop() #stop loop
