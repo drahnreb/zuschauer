@@ -43,8 +43,9 @@ import subprocess
 import sys
 import json
 import uuid
-
+from signal import signal, SIGINT
 import keyring
+
 STORECREDENTIALS = False
 try:
     if platform.system().lower().startswith("win"):
@@ -75,6 +76,19 @@ STORAGES = ["Blob", "ADLS Gen2", "onPrem", "MQTT"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
 PAUSEAFTERMODIFIED = 3  # seconds of pause after file modification and until copying starts
 PAUSEDURINGBULKPROC = 20  # seconds of pause during bulk processing when existing is enabled
+
+
+def signal_handler(signal, frame, args, storageService):
+    if args.storage_type == "MQTT":
+        print('\nShuting down MQTT Client...')
+        # shutdown routine / intercept KeyBoardInterrupt
+        # disconnect MQTT...
+        storageService.shutdown()
+        print('MQTT Client Stopped.')
+    try:
+        sys.exit(0)
+    except SystemExit:
+        os._exit(0)
 
 
 @Gooey(program_name="zuschauer @drahnreb", default_size=(800,500), taskbar=True)
@@ -796,6 +810,11 @@ class StorageService():
     def connected(self):
         return self._available_containers()[0]
 
+    def shutdown(self):
+        if self.storage_type == "MQTT":
+            self.service_client.disconnect()
+            self.service_client.loop_stop()
+
 
 class Zuschauer(FileSystemEventHandler):
     # files to exclude from being watched
@@ -1114,6 +1133,9 @@ if __name__ == "__main__":
             ['save', 'reset', 'load', 'existing', 'account_name', 'account_key', 'client_id', 'client_secret']]
         with open(CONFIGFILE, 'w') as outfile:
             json.dump(config, outfile, indent=2)
+
+    # intercept keyboardinterrupts but terminate processes correctly
+    signal(SIGINT, lambda s,f: signal_handler(s,f,args,storageService))
 
     # run main
     main(args, storageService)
