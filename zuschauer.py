@@ -42,6 +42,7 @@ import arrow
 import subprocess
 import sys
 import json
+import uuid
 
 import keyring
 STORECREDENTIALS = False
@@ -69,17 +70,19 @@ except ImportError as e:
     else:
         print("Cannot use keyring features. Won't be able to store credentials", str(e))
 
-MQTTBUFSIZE = 2000
+MQTTBUFSIZE = 200000  # 200kB
 STORAGES = ["Blob", "ADLS Gen2", "onPrem", "MQTT"]
 CONFIGFILE = Path(Path(__file__).absolute().parent).joinpath('.config')
-PAUSEAFTERMODIFIED = 3 # seconds of pause after file modification and until copying starts
+PAUSEAFTERMODIFIED = 3  # seconds of pause after file modification and until copying starts
+PAUSEDURINGBULKPROC = 20  # seconds of pause during bulk processing when existing is enabled
+
 
 @Gooey(program_name="zuschauer @drahnreb", default_size=(800,500), taskbar=True)
 def parse_arguments(defaults):
     # use arg parsing without gooey to enable help and enable/disable control of config loading
     # gooey parameter disables 'required arguments' to pass first headless check for load arg
     parser = GooeyParser(description=f'Zuschauer - Filesystem watchdog to copy data to remote storage and enable IoT.\tby {__author__}\tv.{__version__}')
-    
+
     requiredNamed = parser.add_argument_group('Required arguments')
     requiredNamed.add_argument(
         "-paths",
@@ -100,7 +103,7 @@ def parse_arguments(defaults):
         required=True,
         help="Allowed file suffix(es) (e.g. .pdf or txt), semicolon-separated (e.g. .pdf;txt). Use asterisk (*) for all types.",
         gooey_options={
-            'initial_value': defaults.get('filetypes', '')  
+            'initial_value': defaults.get('filetypes', '')
         }
     )
     requiredNamed.add_argument(
@@ -111,7 +114,7 @@ def parse_arguments(defaults):
         required=True,
         help="Storage Option.",
         gooey_options={
-            'initial_value': defaults.get('storage_type', STORAGES[0])  
+            'initial_value': defaults.get('storage_type', STORAGES[0])
         }
     )
     requiredNamed.add_argument(
@@ -120,7 +123,7 @@ def parse_arguments(defaults):
         required=True,
         help='Destination. CHECK CAREFULLY!   if MQTT: Topic (no spaces;only ASCII is enforced!) // if onPrem: Network Share Path // if Azure Storage Blob: Container Name if Azure Storage ADLS Gen2: Filesystem',
         gooey_options={
-            'initial_value': defaults.get('destination', "")  
+            'initial_value': defaults.get('destination', "")
         }
     )
     # optional
@@ -130,7 +133,7 @@ def parse_arguments(defaults):
         default='',
         help='Azure Storage Identity: AccountName (from portal.azure.com) // MQTT: Broker Hostname/IP',
         gooey_options={
-            'initial_value': defaults.get('account_name', "")  
+            'initial_value': defaults.get('account_name', "")
         }
     )
     parser.add_argument(
@@ -139,7 +142,7 @@ def parse_arguments(defaults):
         default='',
         help='Azure Storage Identity: Account Key (aka TenantID when Service Principal credentials) // MQTT: Broker Port',
         gooey_options={
-            'initial_value': defaults.get('account_key', "")  
+            'initial_value': defaults.get('account_key', "")
         }
     )
     parser.add_argument(
@@ -148,7 +151,7 @@ def parse_arguments(defaults):
         default='',
         help='Azure Storage Identity (only required if Service Principal): Client ID',
         gooey_options={
-            'initial_value': defaults.get('client_id', "")  
+            'initial_value': defaults.get('client_id', "")
         }
     )
     parser.add_argument(
@@ -157,7 +160,7 @@ def parse_arguments(defaults):
         default='',
         help='Azure Storage Identity (only required if Service Principal): Client Secret',
         gooey_options={
-            'initial_value': defaults.get('client_secret', "")  
+            'initial_value': defaults.get('client_secret', "")
         }
     )
     parser.add_argument(
@@ -166,97 +169,119 @@ def parse_arguments(defaults):
         default='',
         help="Semicolon separated Proxy URLs or IP Adresses for http;http(s) if proxy doesn't support https use http:// prefix twice\nformat: 'http://proxyURLorIP:proxyPort;http(s)://proxyURLorIP:proxyPort'",
         gooey_options={
-            'initial_value': defaults.get('proxy', "")  
+            'initial_value': defaults.get('proxy', "")
         }
     )
     parser.add_argument(
         "--ssl_verify",
         action='store_true',
-        default=False,
         help="En-/Disable SSL Certificate Verification.",
         gooey_options={
-            'initial_value': defaults.get('ssl_verify', False)  
+            'initial_value': defaults.get('ssl_verify', False)
         }
     )
     parser.add_argument(
         "--save",
         action='store_true',
-        default=True,
         help="Save JSON config for next startup or headless mode. (Credentials are stored in keyring)",
         gooey_options={
-            'initial_value': defaults.get('save', True)  
-        }
-    )
-    parser.add_argument(
-        "--load",
-        default=CONFIGFILE,
-        type=str,  # lambda p: Path(p),
-        help="Specify path to JSON config file that should be used and loaded",
-        gooey_options={
-            'initial_value': defaults.get('load', CONFIGFILE)  
+            'initial_value': defaults.get('save', True)
         }
     )
     parser.add_argument(
         "--refresh",
         type=int,
-        default=1,
         help="Refresh Frequency.",
+        widget='IntegerField',
         gooey_options={
-            'initial_value': defaults.get('refresh', 1)  
+            "min": 1,
+            "increment": 1,
+            'initial_value': defaults.get('refresh', 1)
         }
     )
     parser.add_argument(
         "--recursive",
         action='store_true',
-        default=True,
         help="Enable nested paths (deep changes) and check root paths recursively.",
         gooey_options={
-            'initial_value': defaults.get('recursive', True)  
+            'initial_value': defaults.get('recursive', True)
+        }
+    )
+    parser.add_argument(
+        "--oncreation",
+        action='store_true',
+        help="Trigger action on creation of file (additionally to file modification). That may cause double actions depending on the filesystem or upstream file creation procecss. Esp. for MQTT this should be disabled, if both will be triggered without a payload change. An upload to azure is less problematic as it will be blocked if file already exists.",
+        gooey_options={
+            'initial_value': defaults.get('oncreation', True)
         }
     )
     parser.add_argument(
         "--verbose",
         action='store_true',
-        default=True,
         help="Run in verbose mode.",
         gooey_options={
-            'initial_value': defaults.get('verbose', True)  
+            'initial_value': defaults.get('verbose', True)
         }
     )
     parser.add_argument(
         "--dryrun",
         action='store_true',
-        default=False,
         help="Use as a dry run to save config file and test connection without actually uploading anything. E.g. use to create JSON config file only.",
         gooey_options={
-            'initial_value': defaults.get('dryrun', False)  
+            'initial_value': defaults.get('dryrun', False)
         }
     )
     parser.add_argument(
         "--existing",
         action='store_true',
-        default=True,
         help="Upload existing files in specified paths.",
         gooey_options={
-            'initial_value': defaults.get('existing', True)  
+            'initial_value': defaults.get('existing', True)
         }
     )
     parser.add_argument(
-        "--pipeline",
-        action='store_true',
-        default=True,
-        help="Wait delay to prevent azure data factory pipeline concurrency failure.",
+        "--bulkpause",
+        type=int,
+        default=PAUSEDURINGBULKPROC,
+        help="Existing enabled: Wait delay in seconds between bulk processing. E.g. to prevent azure data factory pipeline concurrency failure. Set to zero to disable.",
+        widget='IntegerField',
         gooey_options={
-            'initial_value': defaults.get('pipeline', True)  
+            "min": 0,
+            "increment": 1,
+            'initial_value': defaults.get('pipeline', PAUSEDURINGBULKPROC)  
+        }
+    )
+    parser.add_argument(
+        "--modifiedpause",
+        type=int,
+        default=PAUSEAFTERMODIFIED,
+        help="Wait delay in seconds between modified file trigger and processing. Set to zero to disable.",
+        widget='IntegerField',
+        gooey_options={
+            "min": 0,
+            "increment": 1,
+            'initial_value': defaults.get('modifiedpause', PAUSEAFTERMODIFIED)  
+        }
+    )
+    parser.add_argument(
+        "--mqttpayloadlimit",
+        type=int,
+        default=MQTTBUFSIZE,
+        help="MQTT: Size limit of a MQTT message payload in Bytes. Files with larger size will be chunked and published under chunked sub-topics with an additional `END` message containing a SHA256 hash of the entire file. Limit is 268.435.456 bytes defined by the spec.",
+        widget='IntegerField',
+        gooey_options={
+            "min": 1,
+            "max": 268435456,
+            "increment": 100,
+            'initial_value': defaults.get('mqttpayloadlimit', MQTTBUFSIZE)  
         }
     )
     parser.add_argument(
         "--reset",
         action='store_true',
-        default=False,
         help="Reset all configs.",
         gooey_options={
-            'initial_value': defaults.get('reset', False)  
+            'initial_value': defaults.get('reset', False)
         }
     )
     try:
@@ -346,8 +371,8 @@ def _parse_arguments(defaults={}, gooey=False):
     )
     parser.add_argument(
         "--load",
-        default=CONFIGFILE,
-        type=lambda p: Path(p),
+        default=str(CONFIGFILE),
+        type=str,
         help="Specify path to JSON config file that should be used and loaded",
     )
     parser.add_argument(
@@ -361,6 +386,12 @@ def _parse_arguments(defaults={}, gooey=False):
         action='store_true',
         default=True if gooey else None,
         help="Enable nested paths (deep changes) and check root paths recursively.",
+    )
+    parser.add_argument(
+        "--oncreation",
+        action='store_true',
+        default=True if gooey else None,
+        help="Trigger action on creation of file (additionally to file modification). That may cause double actions depending on the filesystem or upstream file creation procecss. Esp. for MQTT this should be disabled, if both will be triggered without a payload change. An upload to azure is less problematic as it will be blocked if file already exists.",
     )
     parser.add_argument(
         "--verbose",
@@ -384,7 +415,25 @@ def _parse_arguments(defaults={}, gooey=False):
         "--pipeline",
         action='store_true',
         default=True if gooey else None,
-        help="Wait delay to prevent azure data factory pipeline concurrency failure.",
+        help="Wait delay between execAction e.g. to prevent azure data factory pipeline concurrency failure.",
+    )
+    parser.add_argument(
+        "--mqttpayloadlimit",
+        type=int,
+        default=MQTTBUFSIZE if gooey else None,
+        help="MQTT: Size limit of a MQTT message payload in Bytes. Files with larger size will be chunked and published under chunked sub-topics with an additional `END` message containing a SHA256 hash of the entire file. Limit is 268.435.456 bytes defined by the spec.",
+    )
+    parser.add_argument(
+        "--bulkpause",
+        type=int,
+        default=PAUSEDURINGBULKPROC if gooey else None,
+        help="Existing enabled: Wait delay in seconds between bulk processing. E.g. to prevent azure data factory pipeline concurrency failure. Set to zero to disable.",
+    )
+    parser.add_argument(
+        "--modifiedpause",
+        type=int,
+        default=PAUSEAFTERMODIFIED if gooey else None,
+        help="Wait delay in seconds between modified file trigger and processing. Set to zero to disable."
     )
     parser.add_argument(
         "--reset",
@@ -401,13 +450,20 @@ def _parse_arguments(defaults={}, gooey=False):
         # exit child
         os._exit(e.code)
 
+def _mqtt_clean_topic_name(topic_str):
+    # remove reserved $ topic
+    topic_str = topic_str.replace('$', '')
+    # remove non ascii compatible and strip whitespaces
+    topic_str = str(topic_str).strip().replace(' ', '').encode("ascii", "ignore").decode()
+    return topic_str
 
 def checkArgs(args):
     # check Namespace
     try:
         _ = [args.paths, args.filetypes, args.account_name, args.account_key, args.client_id, args.client_secret,\
             args.destination, args.storage_type, args.proxy, args.ssl_verify, \
-            args.save, args.refresh, args.recursive, args.verbose, args.dryrun, args.existing]
+            args.save, args.refresh, args.recursive, args.verbose, args.dryrun, args.existing, \
+            args.modifiedpause, args.bulkpause, args.mqttpayloadlimit]
     except AttributeError as e:
         print(f"Argument in config not set correctly: \n{e}")
         loggin.error(f"Argument in config not set correctly: \n{e}")
@@ -427,10 +483,16 @@ def checkArgs(args):
                 logging.ERROR(f"{p} is not a valid path on this system. Provide an absolute path.")
                 exit(1)
 
-    # Destination
-    assert len(destination), (
+    # destination
+    assert len(args.destination), (
         "No Destination Path or Topic set.")
 
+    # pauses
+    assert int(args.modifiedpause) >= 0 or int(args.bulkpause) >= 0, (
+        f"Pause values {int(args.modifiedpause), int(args.bulkpause)} ought to be non-negative."
+    )
+
+    # filetypes
     if not len(args.filetypes):
         print(f"{args.filetypes} not set correctly.")
         logging.error(f"{args.filetypes} not set correctly.")
@@ -443,12 +505,34 @@ def checkArgs(args):
     else:
         proxy = None
 
+    if args.storage_type == "MQTT":
+        # for mqtt account_key is considered the port that must be int castable
+        try:
+            int(args.account_key)
+        except:
+            print(f"Port {args.account_key} not set correctly.")
+            logging.error(f"Port {args.account_key} not set correctly.")
+            exit(1)
+
+        # payload limit may not exceed limit of MQTT spec
+        assert int(args.mqttpayloadlimit) <= 268435456 and int(args.mqttpayloadlimit) > 0, (
+            "Specified Payload limit is exceeding limit of 268,435,456 bytes defined by MQTT spec or not greater than zero."
+        )
+        clean_destination = _mqtt_clean_topic_name(str(args.destination))
+        # topic length may not exceed limit of MQTT spec
+        assert len(clean_destination) <= 65536 and len(clean_destination) > 0, (
+            "Specified topic is exceeding topic limit of 65536 bytes defined by MQTT spec or empty if stripped of whitespaces and only ascii characters."
+        )
+        assert not (clean_destination.startswith('/') and len(clean_destination[1:])), (
+            f"Don't create empty topic with preceeding slashes in topic {clean_destination} unless you only publish as root topic `/`."
+        )
+
     # init storageService
     # check if correct credentials arg is correct to be passed to watchdog
     storageService = StorageService(
         account_name=args.account_name, account_key=args.account_key, client_id=args.client_id,
         client_secret=args.client_secret, destination=args.destination, storage_type=args.storage_type,
-        proxy=proxy, ssl_verify=args.ssl_verify
+        proxy=proxy, ssl_verify=args.ssl_verify, mqttpayloadlimit=args.mqttpayloadlimit
     )
 
     return storageService
@@ -463,7 +547,9 @@ class StorageService():
             destination: str,
             storage_type: str,
             proxy: dict=None,
-            ssl_verify: bool=False):
+            ssl_verify: bool=False,
+            mqttpayloadlimit: int=MQTTBUFSIZE  # only for MQTT
+            ):
 
         self.account_name = account_name
         self.account_key = account_key  # tenant_id
@@ -472,15 +558,16 @@ class StorageService():
         self.storage_type = storage_type
         self.ssl_verify = ssl_verify
         self.proxy = proxy
+        self.mqttpayloadlimit = mqttpayloadlimit
 
         if self.storage_type == "onPrem":
             self.destination = Path(destination).resolve()
         elif self.storage_type == "MQTT":
-            # remove reserved $ topic and do not create an unnecessary
-            # topic level with a zero character at the front
-            destination = destination.replace('$', '').startswith('/', '')
-            # remove non ascii compatible and strip whitespaces
-            clean_destination = str(destination).strip().replace(' ', '').encode("ascii", "ignore").decode()
+            # do not create an unnecessary topic level
+            # with a zero character at the front
+            if destination.startswith('/'):
+                destination = destination[1:]
+            clean_destination = _mqtt_clean_topic_name(destination)
             if destination != clean_destination:
                 print(f"IMPORTANT! Specified destination contained whitespaces or non ascii compatible characters,\
                         changed Topic to {clean_destination}")
@@ -509,8 +596,8 @@ class StorageService():
                 # connect to broker
                 self.service_client.connect(
                     host=self.account_name,
-                    port=self.account_key,
-                    60
+                    port=int(self.account_key),  # cast to int
+                    keepalive=60
                 )
                 # non-blocking threaded interface to the network loop
                 self.service_client.loop_start()
@@ -616,33 +703,40 @@ class StorageService():
                         shutil.copy2(str(input_path), str(self.destination))
                         failed = False
                 else:
+                    chunking = input_path.stat().st_size > self.mqttpayloadlimit
                     # hashes
-                    out_hash = hashlib.sha256()
-                    def build_payload(counter, input_path, chunk=None, out_hash=None):
-                        payload = str(counter) + input_path + ","
-                        if out_hash is not None:
-                            payload += out_hash.hexdigest()
-                        payload = bytearray(payload, "utf-8")
-                        if chunk is not None:
-                            payload += chunk
-                        return payload
+                    if chunking:
+                        out_hash = hashlib.sha256()
 
                     with open(input_path, "rb") as f:
-                        n = 0
-                        for chunk in f.read(MQTTBUFSIZE):
-                            out_hash.update(chunk)
+                        id_ = None
+                        counter = 0
+                        if chunking:
+                            # chunking enables sub_topics with a counter to concat messages by subscriber
+                            uid = uuid.uuid1()
+                            id_ = uid.hex + '_' + str(uid.time)
+                        # as long as support for python version <3.8 is prefered
+                        # don't use new walrus operator for next two lines
+                        # while (chunk := f.read(self.mqttpayloadlimit)):
+                        chunk = f.read(self.mqttpayloadlimit)
+                        while chunk:
                             self.service_client.publish(
-                                topic=self.destination,
-                                payload=build_payload(n, input_path, chunk),
+                                topic=self._mqtt_build_topic(self.destination, input_path, id_, counter),
+                                payload=chunk,
                                 qos = 1
                             )
-                            n += 1
-                        else:
+                            if chunking:
+                                out_hash.update(chunk)
+                                counter += 1
+                            chunk = f.read(self.mqttpayloadlimit)
+                        if chunking:
+                            # publish the last message with hash
                             self.service_client.publish(
-                                topic=self.destination,
-                                payload=construct_end('end', input_path, out_hash),
+                                topic=self._mqtt_build_topic(self.destination, input_path, id_, 'END'),
+                                payload=self._mqtt_build_payload(out_hash, input_path, counter-1),
                                 qos = 1
                             )
+                    failed = False
             finally:
                 pass
             return failed
@@ -650,6 +744,28 @@ class StorageService():
             print(f"{input_path} does not exist or not a file.")
             logging.error(f"{input_path} does not exist or not a file.")
         return failed
+
+    def _mqtt_build_topic(self, root_topic, input_path, id_=None, counter=0):
+        if id_ and counter:
+            # chunking
+            # with more fine grained sub-topic to make topics identifiable
+            sub_topic = '/'.join([str(input_path.name), str(id_), str(counter)])
+        else:
+            sub_topic = str(input_path.name)
+        sub_topic = _mqtt_clean_topic_name(sub_topic)
+        if root_topic.endswith('/'):
+            root_topic = root_topic[:-1]
+        topic = '/'.join([root_topic, sub_topic])
+        if len(topic.encode('utf-8')) > 65536:
+            # revert to root topic if topic + sub_topic exceeds topic length limit of MQTT spec
+            topic = root_topic
+        return topic
+
+    def _mqtt_build_payload(self, out_hash, input_path, counter):
+        return bytearray(
+            str(out_hash.hexdigest()) + ';' + str(input_path.name) + ';' + str(counter),
+            "utf-8"
+        )
 
     def _available_containers(self):
         success = False
@@ -661,7 +777,7 @@ class StorageService():
                 containers = list(self.service_client.list_containers(logging_enable=True))
             elif self.storage_type == "MQTT":
                 failed, _ = self.service_client.publish(
-                    self.destination, out_message,qos)
+                    self.destination + 'zuschauer/test', f"connection test @drahnreb {platform.node()}", 1)
                 if failed:
                     raise ConnectionError
             else:
@@ -696,7 +812,8 @@ class Zuschauer(FileSystemEventHandler):
 
     def __init__(self, paths, filetypes, storage_type, storageService,
             recursive=True, refreshFrequency=1,
-            verboseMode=True, dryRun=False
+            verboseMode=True, dryRun=False, modifiedpause=PAUSEAFTERMODIFIED,
+            trigger_on_creation=True
         ):
         self.paths = paths
         self.filetypes = filetypes
@@ -707,6 +824,8 @@ class Zuschauer(FileSystemEventHandler):
         self.refreshFrequency = refreshFrequency
         self.storageService = storageService
         self.observer = Observer(timeout=0.1)
+        self.modifiedpause = int(modifiedpause)
+        self.trigger_on_creation = trigger_on_creation
 
         for p in self.paths:
             if p.exists():
@@ -727,11 +846,14 @@ class Zuschauer(FileSystemEventHandler):
             print(f"## would have {'copied' if not overwrite else 'overwritten'}.\nbut --dryrun enabled; no action executed.")
             return
 
-        failed = True
         failed = self.storageService.upload(input_path=changedFile, overwrite=overwrite)
 
-        print(f"$$ Successfully {'copied' if not overwrite else 'overwritten'}: {str(changedFile.name)} {'to' if not overwrite else 'in'} '{self.storage_type}':  {self.storageService.destination}" if not(failed) else f"## Failed copying: {str(changedFile.name)}")
-        logging.info(f"$$ Successfully {'copied' if not overwrite else 'overwritten'}: {str(changedFile.name)} {'to' if not overwrite else 'in'} '{self.storage_type}':  {self.storageService.destination}" if not(failed) else f"## Failed overwriting: {str(changedFile.name)}")
+        msg = f"$$ Successfully {'overwritten' if overwrite else ''} {'copied' if not(overwrite) and self.storage_type != 'MQTT' else 'published'}: `{str(changedFile.name)}` {'to' if (not overwrite or self.storage_type == 'MQTT') else 'in'}  `{self.storageService.account_name if self.storage_type == 'MQTT' else self.storage_type}`:  `{self.storageService.destination}`"\
+            if not(failed)\
+            else f"## Failed {'write' if self.storageService.storage_type != 'MQTT' else 'publish'}: {str(changedFile.name)}"
+        if self.verboseMode:
+            print(msg)
+        logging.info(msg)
 
     def is_interested(self, path: Path, recursive: bool = False):
         if self.exclude.match(str(path)):
@@ -747,14 +869,11 @@ class Zuschauer(FileSystemEventHandler):
                 path = path.parent
                 if self.is_interested(path, recursive=False):
                     return True
-
         return False
 
     def on_change(self, path, overwrite=False):
         path = Path(path)
         if self.is_interested(path, recursive=self.recursive):
-            # print("interesting file")
-            # print("\nis file: ", path.is_file(), '\nsuffix: ', path.suffix, '\nin filetypes: ', path.suffix in self.filetypes)
             if path.is_file() and (path.suffix in self.filetypes or '*' in self.filetypes):
                 self.execAction(path, overwrite)
 
@@ -765,13 +884,12 @@ class Zuschauer(FileSystemEventHandler):
 
         if event.is_directory:
             logging.info(f'created dir {event.src_path}')
-            self.on_change(event.src_path)
-        else:
+        if self.trigger_on_creation:
             self.on_change(event.src_path)
 
     def on_modified(self, event):
         if not event.is_directory:
-            time.sleep(PAUSEAFTERMODIFIED)
+            time.sleep(self.modifiedpause)
             self.on_change(event.src_path, overwrite=True)
 
     def on_moved(self, event):
@@ -802,13 +920,15 @@ def main(args, storageService):
 
     # create watchdog service
     zs = Zuschauer(paths=paths, filetypes=filetypes, storage_type=args.storage_type, storageService=storageService,
-        recursive=args.recursive, refreshFrequency=args.refresh, verboseMode=args.verbose, dryRun=args.dryrun)
+        recursive=args.recursive, refreshFrequency=args.refresh, verboseMode=args.verbose, dryRun=args.dryrun,
+        modifiedpause=args.modifiedpause, trigger_on_creation=args.oncreation
+    )
 
     # upload already available files
     if args.existing:
         if args.verbose:
-            print(f"""-----------------\nUpload {'recursively' if args.recursive else ''} already existing files in:
-                Paths: {list(paths.keys())}, with \nFiletypes: {filetypes}, to \nStorage: {args.storage_type}
+            print(f"""-----------------\nUpload/Publishing {'recursively' if args.recursive else ''} already existing files in:
+                Paths: {[str(p) for p in list(paths.keys())]}, with \nFiletypes: {filetypes}, to \nDestination: {storageService.destination}
             """)
         existing_files = {}
         nExist = 0
@@ -820,24 +940,24 @@ def main(args, storageService):
                     existing_files[path] = foundExistingFiles
         if len(existing_files):
             if args.verbose or args.dryrun:
-                print(f"Dryrun: Could have uploaded a total of {len(existing_files)} existing files.")
+                print(f"Dryrun: Could have uploaded/published a total of {len(existing_files)} existing files.")
             if not args.dryrun:
-                logging.info(f"Uploading a total of {len(existing_files)} existing files.")
+                logging.info(f"Uploading/Publishing a total of {len(existing_files)} existing files.")
                 for existingFiles in existing_files.values():
                     for file_ in existingFiles:
                         if file_.is_file():
                             # upload with non-overwriting flag set to boost upload
                             zs.execAction(file_, overwrite=False)
-                            if args.pipeline:
-                                time.sleep(20)
+                            if args.bulkpause:
+                                time.sleep(int(args.bulkpause))
         else:
             print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
     try:
         if args.verbose:
-            print(f"""Starting watchdog with config:
-                \nPaths: {list(paths.keys())}, \nFiletypes: {filetypes}, \nStorage: {args.storage_type}, \nRefreshRate: {args.refresh}
+            print(f"""\n\nStarting watchdog with config:
+                \nPaths: {[str(p) for p in list(paths.keys())]}, \nFiletypes: {filetypes}, \nStorage: {args.storage_type}, \nRefreshRate: {args.refresh}
             """)
-            print(f"Watch {'recursively' if args.recursive else ''} {list(paths.keys())}, action on file change\n\t{'would (--dryrun aktiv)' if args.dryrun else 'will'} copy on / overwrite in `{args.storage_type}`: {storageService.destination}.")
+            print(f"Watch {'recursively' if args.recursive else ''} {[str(p) for p in list(paths.keys())]}, action on file change\n\t{'would (--dryrun aktiv)' if args.dryrun else 'will'} {f'(over)write to `{args.storage_type}`' if args.storage_type != 'MQTT' else f'publish via MQTT host `{storageService.account_name}` on topic'}: `{storageService.destination}`.")
         # start watchdog service 
         # watch filesystem for file creation
         zs.run()
@@ -852,6 +972,7 @@ if __name__ == "__main__":
                         format='%(asctime)s-%(levelname)s: %(name)s "%(message)s"')
 
     logging.info(f"Starte Zuschauer\tby {__author__}\tv.{__version__}")
+
     # headless arg parsing
     parser = _parse_arguments()
     _args = parser.parse_args()
@@ -866,14 +987,15 @@ if __name__ == "__main__":
             except keyring.errors.PasswordDeleteError:
                 pass
         # remove config file
-        os.remove(CONFIGFILE)
+        if CONFIGFILE.exists():
+            os.remove(CONFIGFILE)
 
-    configFile = _args.load
+    configFile = Path(_args.load)
 
     configItems = {}
     creds_available = False
     # check for credentials
-    if _args.storage_type == "onPrem" or _args.storage_type == "MQTT":
+    if _args.storage_type == "onPrem":
         # not required, assume file share is already mounted by system
         creds_available = True
     else:
@@ -906,21 +1028,25 @@ if __name__ == "__main__":
             configItems["client_secret"] = client_secret
             creds_available = True
 
-
     if configFile.exists() and configFile.is_file():
         # config file available
         logging.info(f'Loading config from file {configFile}')
         with open(configFile, 'rt') as f:
-            print(configItems)
             configItems.update(json.load(f))
-            print(configItems)
+            print(f"Loaded config: ", configItems)
         if creds_available:
             t_args = argparse.Namespace()
             try:
                 # add config options that are not necessary to be specified in config file but need to be initialized
-                for k in ["save", "existing", "pipeline", "dryrun", "reset"]:
+                for k in ["save", "existing", "dryrun", "reset"]:
                     if k not in configItems.keys():
                         configItems[k] = False
+                for k, v in {"mqttpayloadlimit": MQTTBUFSIZE,
+                             "modifiedpause": PAUSEAFTERMODIFIED,
+                             "bulkpause": PAUSEDURINGBULKPROC,
+                             "oncreation": True}.items():
+                    if k not in configItems.keys():
+                        configItems[k] = v
                 # consume current flags
                 for k, v in _args.__dict__.items():
                     if v is not None and 'load' not in k and k not in configItems.keys():  # and v != ''
@@ -948,8 +1074,8 @@ if __name__ == "__main__":
     if args.storage_type == "MQTT":
         import hashlib  # chunked messages
         import paho.mqtt.client as mqtt
-        logger = logging.getLogger('mqtt')
-        logger.setLevel(level)
+        mqttLogger = logging.getLogger('mqtt')
+        mqttLogger.setLevel(level)
 
     elif args.storage_type != "onPrem":
         # azure based
@@ -988,11 +1114,6 @@ if __name__ == "__main__":
             ['save', 'reset', 'load', 'existing', 'account_name', 'account_key', 'client_id', 'client_secret']]
         with open(CONFIGFILE, 'w') as outfile:
             json.dump(config, outfile, indent=2)
+
     # run main
     main(args, storageService)
-
-    # TODO:
-    # shutdown routine / intercept KeyBoardInterrupt
-    # disconnect MQTT...
-    # client.disconnect() #disconnect
-    # client.loop_stop() #stop loop
