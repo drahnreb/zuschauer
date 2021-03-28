@@ -248,7 +248,7 @@ def parse_arguments(defaults):
     parser.add_argument(
         "--existing",
         action='store_true',
-        help="Upload existing files in specified paths.",
+        help="Upload existing files in specified paths. MQTT: caution this will re-publish ALL existing files!",
         gooey_options={
             'initial_value': defaults.get('existing', True)
         }
@@ -423,7 +423,7 @@ def _parse_arguments(defaults={}, gooey=False):
         "--existing",
         action='store_true',
         default=True if gooey else None,
-        help="Upload existing files in specified paths.",
+        help="Upload existing files in specified paths. MQTT: caution this will re-publish ALL existing files!",
     )
     parser.add_argument(
         "--pipeline",
@@ -689,8 +689,13 @@ class StorageService():
             obj_client = self.service_client.get_blob_client(container=self.destination, blob=fname)
         return obj_client
 
-    def upload(self, input_path: Path, overwrite: bool=False, asynced: bool=False):
-        failed = True
+    def _create_success_msg(self, input_path, overwrite):
+        return f"$$ Successfully {'overwritten' if overwrite else ''} {'copied' if not(overwrite) and self.storage_type != 'MQTT' else 'published'}: `{str(input_path.name)}` {'to' if (not overwrite or self.storage_type == 'MQTT') else 'in'}  `{self.account_name if self.storage_type == 'MQTT' else self.storage_type}`:  `{self.destination}`"
+
+    def upload(self, input_path: Path, overwrite: bool=False):
+        error = None
+        msg = ''
+        skipped = False
         input_path = input_path.resolve()
         if input_path.exists() and input_path.is_file():
             try:
@@ -699,40 +704,47 @@ class StorageService():
                     with self._get_obj_client(input_path.name) as obj_client:
                         # Upload content to Storage Account
                         with open(input_path, "rb") as data:
-                            if self.storage_type == "ADLS Gen2":
-                                obj_client.upload_data(data, length=None, overwrite=overwrite, logging_enable=True)
-                            else:
-                                # "Blob"
-                                obj_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
-                    failed = False
-
+                            try:
+                                if self.storage_type == "ADLS Gen2":
+                                    obj_client.upload_data(data, length=None, overwrite=overwrite, logging_enable=True)
+                                else:
+                                    # "Blob"
+                                    obj_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
+                            except ResourceExistsError as e:
+                                skipped = "blob already exists" in str(e)
+                                if skipped:
+                                    # overwrite is tolerated
+                                    # we won't flag an error to skipp waiting etc.
+                                    # but create an info message
+                                    error = f"Blob upload skipped.\n\t{input_path.name} already exists."
+                                else:
+                                    error = str(e)
+                                    # raise all other Exceptions
+                                    raise
                 elif self.storage_type == "onPrem":
                     if not overwrite and self.destination.joinpath(input_path.name).exists():
                         # exists, don't copy.
-                        # Let it fail to signal no copy was made
-                        # failed = False
-                        pass
+                        skipped = True
+                        error = f"Copy skipped. {input_path.name} exists."
                     else:
                         # copy2 takes src file and output folder and infers filename from source if provided a file
                         shutil.copy2(str(input_path), str(self.destination))
-                        failed = False
                 else:
                     chunking = input_path.stat().st_size > self.mqttpayloadlimit
                     # hashes
                     if chunking:
                         out_hash = hashlib.sha256()
-
-                    with open(input_path, "rb") as f:
+                    with open(input_path, "rb") as data:
                         id_ = None
                         counter = 0
                         if chunking:
                             # chunking enables sub_topics with a counter to concat messages by subscriber
                             uid = uuid.uuid1()
-                            id_ = uid.hex + '_' + str(uid.time)
+                            id_ = str(uid.hex) + '_' + str(uid.time)
                         # as long as support for python version <3.8 is prefered
                         # don't use new walrus operator for next two lines
                         # while (chunk := f.read(self.mqttpayloadlimit)):
-                        chunk = f.read(self.mqttpayloadlimit)
+                        chunk = data.read(self.mqttpayloadlimit)
                         while chunk:
                             self.service_client.publish(
                                 topic=self._mqtt_build_topic(self.destination, input_path, id_, counter),
@@ -742,7 +754,7 @@ class StorageService():
                             if chunking:
                                 out_hash.update(chunk)
                                 counter += 1
-                            chunk = f.read(self.mqttpayloadlimit)
+                            chunk = data.read(self.mqttpayloadlimit)
                         if chunking:
                             # publish the last message with hash
                             self.service_client.publish(
@@ -750,14 +762,25 @@ class StorageService():
                                 payload=self._mqtt_build_payload(out_hash, input_path, counter-1),
                                 qos = 1
                             )
-                    failed = False
+                        msg = f"Published {input_path.name} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, input_path, id_, counter)}.\n"
             finally:
-                pass
-            return failed
+                # clean up...
+                try:
+                    data.close()
+                except:
+                    pass
         else:
-            print(f"{input_path} does not exist or not a file.")
-            logging.error(f"{input_path} does not exist or not a file.")
-        return failed
+            error = f"{input_path.name} does not exist or not a file."
+        if error is None:
+            # create success logging message
+            msg += self._create_success_msg(input_path, overwrite)
+            logging.info(msg)
+        else:
+            logging.error(error)
+            if not skipped:
+                msg = f"## Failed {'write' if self.storage_type != 'MQTT' else 'publish'}: {str(input_path.name)} \nwith Error: `{error}`"
+            logging.error(msg)
+        return error, msg
 
     def _mqtt_build_topic(self, root_topic, input_path, id_=None, counter=0):
         if id_ and counter:
@@ -865,14 +888,13 @@ class Zuschauer(FileSystemEventHandler):
             print(f"## would have {'copied' if not overwrite else 'overwritten'}.\nbut --dryrun enabled; no action executed.")
             return
 
-        failed = self.storageService.upload(input_path=changedFile, overwrite=overwrite)
+        error, msg = self.storageService.upload(input_path=changedFile, overwrite=overwrite)
 
-        msg = f"$$ Successfully {'overwritten' if overwrite else ''} {'copied' if not(overwrite) and self.storage_type != 'MQTT' else 'published'}: `{str(changedFile.name)}` {'to' if (not overwrite or self.storage_type == 'MQTT') else 'in'}  `{self.storageService.account_name if self.storage_type == 'MQTT' else self.storage_type}`:  `{self.storageService.destination}`"\
-            if not(failed)\
-            else f"## Failed {'write' if self.storageService.storage_type != 'MQTT' else 'publish'}: {str(changedFile.name)}"
         if self.verboseMode:
             print(msg)
-        logging.info(msg)
+            if error is not None:
+                print(error)
+        return error
 
     def is_interested(self, path: Path, recursive: bool = False):
         if self.exclude.match(str(path)):
@@ -958,7 +980,7 @@ def main(args, storageService):
                 if nExistingFiles:
                     existing_files[path] = foundExistingFiles
         if len(existing_files):
-            if args.verbose or args.dryrun:
+            if args.verbose and args.dryrun:
                 print(f"Dryrun: Could have uploaded/published a total of {len(existing_files)} existing files.")
             if not args.dryrun:
                 logging.info(f"Uploading/Publishing a total of {len(existing_files)} existing files.")
@@ -966,8 +988,8 @@ def main(args, storageService):
                     for file_ in existingFiles:
                         if file_.is_file():
                             # upload with non-overwriting flag set to boost upload
-                            zs.execAction(file_, overwrite=False)
-                            if args.bulkpause:
+                            error = zs.execAction(file_, overwrite=False)
+                            if args.bulkpause and error is None:
                                 time.sleep(int(args.bulkpause))
         else:
             print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
@@ -1049,10 +1071,12 @@ if __name__ == "__main__":
 
     if configFile.exists() and configFile.is_file():
         # config file available
+        # do not log configItems with credentials
         logging.info(f'Loading config from file {configFile}')
         with open(configFile, 'rt') as f:
             configItems.update(json.load(f))
-            print(f"Loaded config: ", configItems)
+            if _args.verbose:
+                print(f"Loaded config: ", configItems)
         if creds_available:
             t_args = argparse.Namespace()
             try:
@@ -1103,6 +1127,7 @@ if __name__ == "__main__":
         from azure.identity import ClientSecretCredential
         from azure.storage.filedatalake import DataLakeServiceClient
         from azure.core.pipeline.policies import ProxyPolicy
+        from azure.core.exceptions import ResourceExistsError
 
         azureLogger = logging.getLogger('azure')
         azureLogger.setLevel(level)
