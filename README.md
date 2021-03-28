@@ -47,9 +47,8 @@ python zuschauer.py -h
 ```
 
 ## Upcoming features:
-* dockerize
-* concurrent upload of existing files and zs.run()
-* implement on-premise location (file share)
+* write unit tests with complete coverage; although all features are tested and working fine
+* no new features are planned yet
 
 ## Author
 Bernhard Häußler, TU Berlin
