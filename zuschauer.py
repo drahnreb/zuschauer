@@ -45,6 +45,7 @@ import json
 import uuid
 from signal import signal, SIGINT
 import keyring
+from tqdm import tqdm
 
 STORECREDENTIALS = False
 try:
@@ -979,18 +980,24 @@ def main(args, storageService):
                 nExistingFiles = len(foundExistingFiles)
                 if nExistingFiles:
                     existing_files[path] = foundExistingFiles
-        if len(existing_files):
+                    # update counter
+                    nExist += nExistingFiles
+        if nExist:
             if args.verbose and args.dryrun:
-                print(f"Dryrun: Could have uploaded/published a total of {len(existing_files)} existing files.")
+                print(f"Dryrun: Could have uploaded/published a total of {nExist} existing files.")
             if not args.dryrun:
-                logging.info(f"Uploading/Publishing a total of {len(existing_files)} existing files.")
-                for existingFiles in existing_files.values():
-                    for file_ in existingFiles:
-                        if file_.is_file():
-                            # upload with non-overwriting flag set to boost upload
-                            error = zs.execAction(file_, overwrite=False)
-                            if args.bulkpause and error is None:
-                                time.sleep(int(args.bulkpause))
+                logging.info(f"Uploading/Publishing a total of {nExist} existing files.")
+                with tqdm(total=nExist) as pbar:
+                    for existingFiles in existing_files.values():
+                        for file_ in existingFiles:
+                            if file_.is_file():
+                                # ugly way of seperating status bar line from status message
+                                print('')
+                                # upload with non-overwriting flag set to boost upload
+                                error = zs.execAction(file_, overwrite=False)
+                                if args.bulkpause and error is None:
+                                    time.sleep(int(args.bulkpause))
+                            pbar.update(1)
         else:
             print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
     try:
