@@ -701,8 +701,10 @@ class StorageService():
         if input_path.exists() and input_path.is_file():
             try:
                 if self.storage_type in ["Blob", "ADLS Gen2"]:
+                    # filename encoding should be utf-8 otherwise DeserializationError
+                    filename = str(input_path.name).encode("ascii", "ignore").decode()
                     # Instantiate a new Object Client
-                    with self._get_obj_client(input_path.name) as obj_client:
+                    with self._get_obj_client(filename) as obj_client:
                         # Upload content to Storage Account
                         with open(input_path, "rb") as data:
                             try:
@@ -711,17 +713,18 @@ class StorageService():
                                 else:
                                     # "Blob"
                                     obj_client.upload_blob(data, blob_type="BlockBlob", overwrite=overwrite, logging_enable=True)
-                            except ResourceExistsError as e:
+                            except (ResourceExistsError, DeserializationError) as e:
                                 skipped = "blob already exists" in str(e)
                                 if skipped:
                                     # overwrite is tolerated
                                     # we won't flag an error to skipp waiting etc.
                                     # but create an info message
-                                    error = f"Blob upload skipped.\n\t{input_path.name} already exists."
+                                    error = f"Blob upload skipped.\n\t{filename} already exists."
                                 else:
                                     error = str(e)
+                                    print(error, filename)
                                     # raise all other Exceptions
-                                    raise
+                                    # raise
                 elif self.storage_type == "onPrem":
                     if not overwrite and self.destination.joinpath(input_path.name).exists():
                         # exists, don't copy.
@@ -1135,6 +1138,7 @@ if __name__ == "__main__":
         from azure.storage.filedatalake import DataLakeServiceClient
         from azure.core.pipeline.policies import ProxyPolicy
         from azure.core.exceptions import ResourceExistsError
+        from msrest.exceptions import DeserializationError
 
         azureLogger = logging.getLogger('azure')
         azureLogger.setLevel(level)
