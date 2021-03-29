@@ -690,19 +690,27 @@ class StorageService():
             obj_client = self.service_client.get_blob_client(container=self.destination, blob=fname)
         return obj_client
 
-    def _create_success_msg(self, input_path, overwrite):
-        return f"$$ Successfully {'overwritten' if overwrite else ''} {'copied' if not(overwrite) and self.storage_type != 'MQTT' else 'published'}: `{str(input_path.name)}` {'to' if (not overwrite or self.storage_type == 'MQTT') else 'in'}  `{self.account_name if self.storage_type == 'MQTT' else self.storage_type}`:  `{self.destination}`"
+    def _create_success_msg(self, filename, overwrite):
+        return f"$$ Successfully {'overwritten' if overwrite else ''} {'copied' if not(overwrite) and self.storage_type != 'MQTT' else 'published'}: `{filename}` {'to' if (not overwrite or self.storage_type == 'MQTT') else 'in'}  `{self.account_name if self.storage_type == 'MQTT' else self.storage_type}`:  `{self.destination}`"
+
+    def _escape_non_unicode_chr(self, fn):
+        # replace ä, ö, ü, ß
+        return fn.replace('\x84', 'ä').replace('\x8E', 'Ä')\
+                .replace('\x94', 'ö').replace('\x99', 'Ö')\
+                .replace('\x81', 'ü').replace('\x9A', 'Ü')\
+                .replace('\xDF', 'ß')\
+                .replace('\\', '')
 
     def upload(self, input_path: Path, overwrite: bool=False):
         error = None
         msg = ''
         skipped = False
         input_path = input_path.resolve()
+        # filename encoding should be utf-8 otherwise DeserializationError
+        filename = self._escape_non_unicode_chr(str(input_path.name))
         if input_path.exists() and input_path.is_file():
             try:
-                if self.storage_type in ["Blob", "ADLS Gen2"]:
-                    # filename encoding should be utf-8 otherwise DeserializationError
-                    filename = str(input_path.name).encode("ascii", "ignore").decode()
+                if self.storage_type in ["Blob", "ADLS Gen2"]:                    
                     # Instantiate a new Object Client
                     with self._get_obj_client(filename) as obj_client:
                         # Upload content to Storage Account
@@ -726,10 +734,10 @@ class StorageService():
                                     # raise all other Exceptions
                                     # raise
                 elif self.storage_type == "onPrem":
-                    if not overwrite and self.destination.joinpath(input_path.name).exists():
+                    if not overwrite and self.destination.joinpath(filename).exists():
                         # exists, don't copy.
                         skipped = True
-                        error = f"Copy skipped. {input_path.name} exists."
+                        error = f"Copy skipped. {filename} exists."
                     else:
                         # copy2 takes src file and output folder and infers filename from source if provided a file
                         shutil.copy2(str(input_path), str(self.destination))
@@ -751,7 +759,7 @@ class StorageService():
                         chunk = data.read(self.mqttpayloadlimit)
                         while chunk:
                             self.service_client.publish(
-                                topic=self._mqtt_build_topic(self.destination, input_path, id_, counter),
+                                topic=self._mqtt_build_topic(self.destination, filename, id_, counter),
                                 payload=chunk,
                                 qos = 1
                             )
@@ -762,11 +770,11 @@ class StorageService():
                         if chunking:
                             # publish the last message with hash
                             self.service_client.publish(
-                                topic=self._mqtt_build_topic(self.destination, input_path, id_, 'END'),
+                                topic=self._mqtt_build_topic(self.destination, filename, id_, 'END'),
                                 payload=self._mqtt_build_payload(out_hash, input_path, counter-1),
                                 qos = 1
                             )
-                        msg = f"Published {input_path.name} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, input_path, id_, counter)}.\n"
+                        msg = f"Published {filename} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, input_path, id_, counter)}.\n"
             finally:
                 # clean up...
                 try:
@@ -777,7 +785,7 @@ class StorageService():
             error = f"{input_path.name} does not exist or not a file."
         if error is None:
             # create success logging message
-            msg += self._create_success_msg(input_path, overwrite)
+            msg += self._create_success_msg(filename, overwrite)
             logging.info(msg)
         else:
             logging.error(error)
@@ -786,13 +794,13 @@ class StorageService():
             logging.error(msg)
         return error, msg
 
-    def _mqtt_build_topic(self, root_topic, input_path, id_=None, counter=0):
+    def _mqtt_build_topic(self, root_topic, filename, id_=None, counter=0):
         if id_ and counter:
             # chunking
             # with more fine grained sub-topic to make topics identifiable
-            sub_topic = '/'.join([str(input_path.name), str(id_), str(counter)])
+            sub_topic = '/'.join([filename, str(id_), str(counter)])
         else:
-            sub_topic = str(input_path.name)
+            sub_topic = filename
         sub_topic = _mqtt_clean_topic_name(sub_topic)
         if root_topic.endswith('/'):
             root_topic = root_topic[:-1]
@@ -802,9 +810,9 @@ class StorageService():
             topic = root_topic
         return topic
 
-    def _mqtt_build_payload(self, out_hash, input_path, counter):
+    def _mqtt_build_payload(self, out_hash, filename, counter):
         return bytearray(
-            str(out_hash.hexdigest()) + ';' + str(input_path.name) + ';' + str(counter),
+            str(out_hash.hexdigest()) + ';' + filename + ';' + str(counter),
             "utf-8"
         )
 
