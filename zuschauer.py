@@ -467,7 +467,7 @@ def _parse_arguments(defaults={}, gooey=False):
 
 def _mqtt_clean_topic_name(topic_str):
     # remove reserved $ topic
-    topic_str = topic_str.replace('$', '')
+    topic_str = str(topic_str).replace('$', '')
     # remove non ascii compatible and strip whitespaces
     topic_str = str(topic_str).strip().replace(' ', '').encode("ascii", "ignore").decode()
     return topic_str
@@ -582,7 +582,7 @@ class StorageService():
             # with a zero character at the front
             if destination.startswith('/'):
                 destination = destination[1:]
-            clean_destination = _mqtt_clean_topic_name(destination)
+            clean_destination = _mqtt_clean_topic_name(str(destination))
             if destination != clean_destination:
                 print(f"IMPORTANT! Specified destination contained whitespaces or non ascii compatible characters,\
                         changed Topic to {clean_destination}")
@@ -695,7 +695,7 @@ class StorageService():
 
     def _escape_non_unicode_chr(self, fn):
         # replace ä, ö, ü, ß
-        return fn.replace('\x84', 'ä').replace('\x8E', 'Ä')\
+        return str(fn).replace('\x84', 'ä').replace('\x8E', 'Ä')\
                 .replace('\x94', 'ö').replace('\x99', 'Ö')\
                 .replace('\x81', 'ü').replace('\x9A', 'Ü')\
                 .replace('\xDF', 'ß')\
@@ -740,7 +740,7 @@ class StorageService():
                         error = f"Copy skipped. {filename} exists."
                     else:
                         # copy2 takes src file and output folder and infers filename from source if provided a file
-                        shutil.copy2(str(input_path), str(self.destination))
+                        shutil.copy2(str(input_path), str(self.destination.joinpath(filename)))
                 else:
                     chunking = input_path.stat().st_size > self.mqttpayloadlimit
                     # hashes
@@ -774,7 +774,7 @@ class StorageService():
                                 payload=self._mqtt_build_payload(out_hash, input_path, counter-1),
                                 qos = 1
                             )
-                        msg = f"Published {filename} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, input_path, id_, counter)}.\n"
+                        msg = f"Published {filename} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, filename, id_, counter)}.\n"
             finally:
                 # clean up...
                 try:
@@ -801,7 +801,7 @@ class StorageService():
             sub_topic = '/'.join([filename, str(id_), str(counter)])
         else:
             sub_topic = filename
-        sub_topic = _mqtt_clean_topic_name(sub_topic)
+        sub_topic = _mqtt_clean_topic_name(str(sub_topic))
         if root_topic.endswith('/'):
             root_topic = root_topic[:-1]
         topic = '/'.join([root_topic, sub_topic])
@@ -826,7 +826,10 @@ class StorageService():
                 containers = list(self.service_client.list_containers(logging_enable=True))
             elif self.storage_type == "MQTT":
                 failed, _ = self.service_client.publish(
-                    self.destination + 'zuschauer/test', f"connection test @drahnreb {platform.node()}", 1)
+                    self._mqtt_build_topic(self.destination, 'ONLINE'),
+                    f"Connection Test. zuschauer @drahnreb ~v: {__version__}. client name: {platform.node()}",
+                    1
+                )
                 if failed:
                     raise ConnectionError
             else:
@@ -998,17 +1001,21 @@ def main(args, storageService):
                 print(f"Dryrun: Could have uploaded/published a total of {nExist} existing files.")
             if not args.dryrun:
                 logging.info(f"Uploading/Publishing a total of {nExist} existing files.")
-                with tqdm(total=nExist) as pbar:
+                with tqdm(total=nExist, initial=1) as pbar:
+                    n = 0
                     for existingFiles in existing_files.values():
                         for file_ in existingFiles:
+                            n += 1
+                            last_element = n == nExist
                             if file_.is_file():
                                 # ugly way of seperating status bar line from status message
                                 print('')
                                 # upload with non-overwriting flag set to boost upload
                                 error = zs.execAction(file_, overwrite=False)
-                                if args.bulkpause and error is None:
+                                if args.bulkpause and error is None and not last_element:
                                     time.sleep(int(args.bulkpause))
-                            pbar.update(1)
+                            if not last_element:
+                                pbar.update(1)
         else:
             print(">>>> No existing files found. Nothing uploaded.\n-----------------\n\n")
     try:
