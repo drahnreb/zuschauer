@@ -468,8 +468,16 @@ def _parse_arguments(defaults={}, gooey=False):
 def _mqtt_clean_topic_name(topic_str):
     # remove reserved $ topic
     topic_str = str(topic_str).replace('$', '')
+    # convert umlaute before they get removed
+    topic_str = topic_str.replace('ß', 'ss')\
+        .replace('ä', 'ae')\
+        .replace('ö', 'oe')\
+        .replace('ü', 'ue')\
+        .replace('Ä', 'Ae')\
+        .replace('Ö', 'Oe')\
+        .replace('Ü', 'Ue')
     # remove non ascii compatible and strip whitespaces
-    topic_str = str(topic_str).strip().replace(' ', '').encode("ascii", "ignore").decode()
+    topic_str = topic_str.strip().replace(' ', '').encode("ascii", "ignore").decode()
     return topic_str
 
 def checkArgs(args):
@@ -706,9 +714,9 @@ class StorageService():
         msg = ''
         skipped = False
         input_path = input_path.resolve()
-        # filename encoding should be utf-8 otherwise DeserializationError
-        filename = self._escape_non_unicode_chr(str(input_path.name))
         if input_path.exists() and input_path.is_file():
+            # filename encoding should be utf-8 otherwise DeserializationError
+            filename = self._escape_non_unicode_chr(str(input_path.name))
             try:
                 if self.storage_type in ["Blob", "ADLS Gen2"]:                    
                     # Instantiate a new Object Client
@@ -742,6 +750,10 @@ class StorageService():
                         # copy2 takes src file and output folder and infers filename from source if provided a file
                         shutil.copy2(str(input_path), str(self.destination.joinpath(filename)))
                 else:
+                    suffixes = input_path.suffixes
+                    filename = str(input_path.name)
+                    filename = filename.rsplit('.', len(suffixes))[0]
+                    filename = self._escape_non_unicode_chr(filename)
                     chunking = input_path.stat().st_size > self.mqttpayloadlimit
                     # hashes
                     if chunking:
@@ -759,7 +771,7 @@ class StorageService():
                         chunk = data.read(self.mqttpayloadlimit)
                         while chunk:
                             self.service_client.publish(
-                                topic=self._mqtt_build_topic(self.destination, filename, id_, counter),
+                                topic=self._mqtt_build_topic(self.destination, filename, suffixes, id_, counter),
                                 payload=chunk,
                                 qos = 1
                             )
@@ -770,35 +782,36 @@ class StorageService():
                         if chunking:
                             # publish the last message with hash
                             self.service_client.publish(
-                                topic=self._mqtt_build_topic(self.destination, filename, id_, 'END'),
-                                payload=self._mqtt_build_payload(out_hash, input_path, counter-1),
+                                topic=self._mqtt_build_topic(self.destination, filename, suffixes, id_, 'END'),
+                                payload=self._mqtt_build_payload(out_hash, str(input_path.name), counter-1),
                                 qos = 1
                             )
-                        msg = f"Published {filename} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, filename, id_, counter)}.\n"
+                        msg = f"Published {filename} in {counter} chunks on topic: {self._mqtt_build_topic(self.destination, filename, suffixes, id_, counter)}.\n"
             finally:
                 # clean up...
                 try:
                     data.close()
                 except:
                     pass
-        else:
-            error = f"{input_path.name} does not exist or not a file."
-        if error is None:
+
             # create success logging message
             msg += self._create_success_msg(filename, overwrite)
             logging.info(msg)
         else:
+            error = f"{input_path.name} does not exist or not a file."
             logging.error(error)
             if not skipped:
                 msg = f"## Failed {'write' if self.storage_type != 'MQTT' else 'publish'}: {str(input_path.name)} \nwith Error: `{error}`"
             logging.error(msg)
         return error, msg
 
-    def _mqtt_build_topic(self, root_topic, filename, id_=None, counter=0):
+    def _mqtt_build_topic(self, root_topic, filename, suffixes=[], id_=None, counter=0):
         if id_ and counter:
             # chunking
             # with more fine grained sub-topic to make topics identifiable
-            sub_topic = '/'.join([filename, str(id_), str(counter)])
+            sub_topic = '/'.join([filename] + suffixes + [str(id_), str(counter)])
+        elif len(suffixes):
+            sub_topic = '/'.join([filename] + suffixes)
         else:
             sub_topic = filename
         sub_topic = _mqtt_clean_topic_name(str(sub_topic))
@@ -1182,8 +1195,8 @@ if __name__ == "__main__":
         config['dryrun'] = False
         [config.pop(k, None) for k in\
             ['save', 'reset', 'load', 'existing', 'account_name', 'account_key', 'client_id', 'client_secret']]
-        with open(CONFIGFILE, 'w') as outfile:
-            json.dump(config, outfile, indent=2)
+        with open(CONFIGFILE, 'w', encoding='utf-8') as outfile:
+            json.dump(config, outfile, indent=2, ensure_ascii=False)
 
     # intercept keyboardinterrupts but terminate processes correctly
     signal(SIGINT, lambda s,f: signal_handler(s,f,args,storageService))
